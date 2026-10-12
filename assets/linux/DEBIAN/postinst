@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+ln -sf /opt/Monogatari/monogatari /usr/bin/monogatari
+chmod +x /usr/bin/monogatari
+update-mime-database /usr/share/mime || true
+update-desktop-database /usr/share/applications || true
+exit 0

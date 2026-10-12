@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Monogatari
+Name[zh_CN]=物语
+Name[zh_TW]=物语
+Comment=Watch Animes online with danmaku support.
+Comment[zh_CN]=一款好用的追番软件
+Exec=monogatari
+StartupWMClass=Monogatari
+Icon=io.github.Predidit.Kazumi
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Video;
