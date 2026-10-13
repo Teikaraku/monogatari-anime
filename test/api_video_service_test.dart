@@ -6,16 +6,18 @@ import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/services/api_video/api_video_service.dart';
 
 BangumiItem subject({
+  int id = 42,
   String name = '测试动画',
   String? chinese,
   List<String> aliases = const [],
+  String airDate = '2024-01-01',
 }) => BangumiItem(
-  id: 42,
+  id: id,
   type: 2,
   name: name,
   nameCn: chinese ?? name,
   summary: '',
-  airDate: '2024-01-01',
+  airDate: airDate,
   airWeekday: 1,
   rank: 0,
   images: {},
@@ -33,11 +35,12 @@ Map<String, dynamic> row({
   String? entries,
   String type = '日韩动漫',
   String from = 'm3u8',
+  String year = '2024',
 }) => {
   'vod_id': id,
   'vod_name': name,
   'type_name': type,
-  'vod_year': '2024',
+  'vod_year': year,
   'vod_play_from': from,
   'vod_play_url':
       entries ?? r'第01集$https://cdn.test/1.m3u8#第02集$https://cdn.test/2.m3u8',
@@ -51,7 +54,7 @@ Map<String, dynamic> document(List<Map<String, dynamic>> rows) => {
 
 void main() {
   test(
-    'catalog uses 1080zyk4 first, is lazy and shares its cache with candidates',
+    'catalog selects 1080zyk4 first and shares prepared metadata with candidates',
     () async {
       final requests = <Uri>[];
       final service = ApiVideoService(
@@ -63,7 +66,7 @@ void main() {
       final item = subject();
       final catalog = await service.loadCatalog(item);
       expect(catalog.provider, ApiVideoProvider.zy1080);
-      expect(requests.map((uri) => uri.host), ['api.yzzy-api.com']);
+      expect(requests.map((uri) => uri.host), _providerHosts);
 
       final first = await service
           .candidatesForEpisode(item, catalog.episodes[1])
@@ -71,7 +74,7 @@ void main() {
       expect(first.episode.number, 2);
       expect(first.url, 'https://cdn.test/2.m3u8');
       expect(first.httpHeaders['Referer'], 'https://1080zyk4.com/');
-      expect(requests, hasLength(1));
+      expect(requests, hasLength(3));
       expect(
         apiEpisodePageUrl(item.id, first.episode),
         'monogatari://episode/42/2',
@@ -182,10 +185,10 @@ void main() {
       final catalog = await service.loadCatalog(subject());
       expect(catalog.provider, ApiVideoProvider.zy1080);
       expect(catalog.id, '11');
-      expect(calls.map((uri) => uri.host).toSet(), {'api.yzzy-api.com'});
-      expect(calls.map((uri) => uri.path).toSet(), {'/inc/apijson.php'});
-      expect(calls.map((uri) => uri.queryParameters['pg']), ['1', '2']);
-      expect(calls.last.queryParameters['wd'], '测试动画');
+      final primary = calls.where((uri) => uri.host == 'api.yzzy-api.com');
+      expect(primary.map((uri) => uri.path).toSet(), {'/inc/apijson.php'});
+      expect(primary.map((uri) => uri.queryParameters['pg']), ['1', '2']);
+      expect(primary.last.queryParameters['wd'], '测试动画');
     },
   );
 
@@ -383,7 +386,9 @@ void main() {
       final pages = <String?>[];
       final service = ApiVideoService(
         transport: (uri, token) async {
-          pages.add(uri.queryParameters['pg']);
+          if (uri.host == 'api.yzzy-api.com') {
+            pages.add(uri.queryParameters['pg']);
+          }
           if (uri.queryParameters['pg'] == '1') {
             return {
               ...document([
@@ -412,6 +417,7 @@ void main() {
       var requests = 0;
       final service = ApiVideoService(
         transport: (uri, token) async {
+          if (uri.host != 'api.yzzy-api.com') return document([row()]);
           requests++;
           if (requests == 1) {
             oldStarted.complete();
@@ -436,4 +442,417 @@ void main() {
       expect(requests, 2);
     },
   );
+
+  test('unlistened candidate streams perform no requests', () {
+    final transport = _ControlledMetadata();
+    final service = ApiVideoService(transport: transport.call);
+    service.candidatesForEpisode(
+      subject(),
+      const ApiVideoEpisode(key: '1', title: '第1集', number: 1),
+    );
+    expect(transport.requests, isEmpty);
+  });
+
+  test(
+    'prefetch prepares three JSON APIs without requesting playlists or media',
+    () async {
+      final transport = _ControlledMetadata();
+      final service = ApiVideoService(transport: transport.call);
+      final item = subject();
+      final warmup = service.prefetchCatalog(item);
+      expect(
+        transport.requests.map((request) => request.uri.host),
+        _providerHosts,
+      );
+      expect(
+        transport.requests.map((request) => request.uri.queryParameters['ac']),
+        everyElement('detail'),
+      );
+      expect(
+        transport.requests.map((request) => request.uri.path),
+        everyElement(isNot(endsWith('.m3u8'))),
+      );
+      transport.completeAll();
+      await warmup;
+      final catalog = await service.loadCatalog(item);
+      await service.expandedEpisodes(item, catalog).toList();
+      await service.candidatesForEpisode(item, catalog.episodes.first).first;
+      expect(transport.requests, hasLength(3));
+    },
+  );
+
+  test(
+    'fallback warmup survives the early catalog result and is shared by expansion and playback',
+    () async {
+      final transport = _ControlledMetadata();
+      final service = ApiVideoService(transport: transport.call);
+      final item = subject();
+      final catalogFuture = service.loadCatalog(item);
+      transport.requests.first.response.complete(
+        document([row(entries: r'第01集$https://primary.test/1.m3u8')]),
+      );
+      final catalog = await catalogFuture;
+      expect(
+        transport.requests.skip(1).map((request) => request.token.isCancelled),
+        everyElement(isFalse),
+      );
+      final expansion = service.expandedEpisodes(item, catalog).toList();
+      final playback = service
+          .candidatesForEpisode(
+            item,
+            const ApiVideoEpisode(key: '2', title: '第2集', number: 2),
+          )
+          .first;
+      await _flushEvents();
+      expect(transport.requests, hasLength(3));
+      transport.requests[2].response.complete(
+        document([row(entries: r'第03集$https://third.test/3.m3u8')]),
+      );
+      transport.requests[1].response.complete(
+        document([row(entries: r'第02集$https://second.test/2.m3u8')]),
+      );
+      expect((await playback).provider, ApiVideoProvider.baofeng);
+      expect((await expansion).last.map((episode) => episode.key), [
+        '1',
+        '2',
+        '3',
+      ]);
+      expect(transport.requests, hasLength(3));
+    },
+  );
+
+  test(
+    'cancelling one consumer leaves shared requests and their successful cache intact',
+    () async {
+      final transport = _ControlledMetadata();
+      final service = ApiVideoService(transport: transport.call);
+      final cancelled = CancelToken();
+      final interested = CancelToken();
+      final first = service.prefetchCatalog(subject(), cancelToken: cancelled);
+      final firstResult = expectLater(first, throwsA(isA<DioException>()));
+      final second = service.prefetchCatalog(
+        subject(),
+        cancelToken: interested,
+      );
+      expect(transport.requests, hasLength(3));
+      cancelled.cancel('detail page left');
+      await firstResult;
+      expect(
+        transport.requests.map((request) => request.token.isCancelled),
+        everyElement(isFalse),
+      );
+      transport.completeAll();
+      await second;
+      expect(
+        (await service.loadCatalog(subject())).provider,
+        ApiVideoProvider.zy1080,
+      );
+      expect(transport.requests, hasLength(3));
+    },
+  );
+
+  test(
+    'last consumer cancellation aborts all flights without poisoning the next attempt',
+    () async {
+      final transport = _ControlledMetadata();
+      final service = ApiVideoService(transport: transport.call);
+      final firstToken = CancelToken();
+      final secondToken = CancelToken();
+      final first = expectLater(
+        service.prefetchCatalog(subject(), cancelToken: firstToken),
+        throwsA(isA<DioException>()),
+      );
+      final second = expectLater(
+        service.prefetchCatalog(subject(), cancelToken: secondToken),
+        throwsA(isA<DioException>()),
+      );
+      firstToken.cancel('left');
+      secondToken.cancel('left');
+      await Future.wait([first, second]);
+      expect(
+        transport.requests.map((request) => request.token.isCancelled),
+        everyElement(isTrue),
+      );
+      final retry = service.prefetchCatalog(subject());
+      expect(transport.requests, hasLength(6));
+      transport.completeAll();
+      await retry;
+      expect(
+        (await service.loadCatalog(subject())).provider,
+        ApiVideoProvider.zy1080,
+      );
+      expect(transport.requests, hasLength(6));
+    },
+  );
+
+  test(
+    'stream cancellation releases leases immediately even while awaiting metadata',
+    () async {
+      final transport = _ControlledMetadata();
+      final service = ApiVideoService(transport: transport.call);
+      final subscription = service
+          .candidatesForEpisode(
+            subject(),
+            const ApiVideoEpisode(key: '1', title: '第1集', number: 1),
+          )
+          .listen((_) {});
+      await _flushEvents();
+      expect(transport.requests, hasLength(3));
+      await subscription.cancel().timeout(const Duration(seconds: 1));
+      expect(
+        transport.requests.map((request) => request.token.isCancelled),
+        everyElement(isTrue),
+      );
+      final retry = service.prefetchCatalog(subject());
+      expect(transport.requests, hasLength(6));
+      transport.completeAll();
+      await retry;
+    },
+  );
+
+  test(
+    'caller cancellation is still reported to an active candidate listener',
+    () async {
+      final transport = _ControlledMetadata();
+      final service = ApiVideoService(transport: transport.call);
+      final token = CancelToken();
+      final cancelled = expectLater(
+        service
+            .candidatesForEpisode(
+              subject(),
+              const ApiVideoEpisode(key: '1', title: '第1集', number: 1),
+              cancelToken: token,
+            )
+            .toList(),
+        throwsA(isA<DioException>()),
+      );
+      await _flushEvents();
+      token.cancel('changed episode');
+      await cancelled;
+      expect(
+        transport.requests.map((request) => request.token.isCancelled),
+        everyElement(isTrue),
+      );
+    },
+  );
+
+  test(
+    'cancelling a waiting stream leaves another operation interested in its shared flights',
+    () async {
+      final transport = _ControlledMetadata();
+      final service = ApiVideoService(transport: transport.call);
+      final warmup = service.prefetchCatalog(subject());
+      final subscription = service
+          .candidatesForEpisode(
+            subject(),
+            const ApiVideoEpisode(key: '1', title: '第1集', number: 1),
+          )
+          .listen((_) {});
+      await _flushEvents();
+      await subscription.cancel().timeout(const Duration(seconds: 1));
+      expect(transport.requests, hasLength(3));
+      expect(
+        transport.requests.map((request) => request.token.isCancelled),
+        everyElement(isFalse),
+      );
+      transport.completeAll();
+      await warmup;
+      expect(
+        (await service.loadCatalog(subject())).provider,
+        ApiVideoProvider.zy1080,
+      );
+      expect(transport.requests, hasLength(3));
+    },
+  );
+
+  test(
+    'faster lower-priority responses cannot win catalog or candidate selection',
+    () async {
+      final transport = _ControlledMetadata();
+      final service = ApiVideoService(transport: transport.call);
+      var catalogCompleted = false;
+      final catalogFuture = service.loadCatalog(subject()).then((value) {
+        catalogCompleted = true;
+        return value;
+      });
+      transport.requests[2].response.complete(document([row(id: 'third')]));
+      transport.requests[1].response.complete(document([row(id: 'second')]));
+      await _flushEvents();
+      expect(catalogCompleted, isFalse);
+      transport.requests[0].response.complete(document([row(id: 'first')]));
+      final catalog = await catalogFuture;
+      expect(catalog.provider, ApiVideoProvider.zy1080);
+      final candidates = await service
+          .candidatesForEpisode(subject(), catalog.episodes.first)
+          .toList();
+      expect(
+        candidates.map((candidate) => candidate.provider),
+        apiVideoProviderPriority,
+      );
+      expect(candidates.map((candidate) => candidate.id), [
+        'first',
+        'second',
+        'third',
+      ]);
+    },
+  );
+
+  test(
+    'all source timeout budgets begin together rather than after previous failures',
+    () async {
+      final started = <Uri>[];
+      final startedCountsAtTimeout = <int>[];
+      final service = ApiVideoService(
+        providerTimeout: const Duration(milliseconds: 30),
+        transport: (uri, token) {
+          started.add(uri);
+          unawaited(
+            token!.whenCancel.then((_) {
+              startedCountsAtTimeout.add(started.length);
+            }),
+          );
+          return Completer<Object?>().future;
+        },
+      );
+      await expectLater(
+        service.loadCatalog(subject()),
+        throwsA(isA<ApiVideoUnavailableException>()),
+      );
+      expect(started.map((uri) => uri.host), _providerHosts);
+      expect(startedCountsAtTimeout, [3, 3, 3]);
+    },
+  );
+
+  test(
+    'clearCache separates generations without stale writes or removing fresh shared flights',
+    () async {
+      final transport = _ControlledMetadata();
+      final service = ApiVideoService(transport: transport.call);
+      final oldWarmup = service.prefetchCatalog(subject());
+      service.clearCache();
+      final freshWarmup = service.prefetchCatalog(subject());
+      expect(transport.requests, hasLength(6));
+      for (final request in transport.requests.take(3)) {
+        request.response.complete(document([row(id: 'stale')]));
+      }
+      await oldWarmup;
+      final current = service.loadCatalog(subject());
+      expect(transport.requests, hasLength(6));
+      for (final request in transport.requests.skip(3)) {
+        request.response.complete(document([row(id: 'fresh')]));
+      }
+      await freshWarmup;
+      expect((await current).id, 'fresh');
+      expect((await service.loadCatalog(subject())).id, 'fresh');
+      expect(transport.requests, hasLength(6));
+    },
+  );
+
+  test(
+    'matching snapshots the mutable subject year and separates cache keys',
+    () async {
+      final transport = _ControlledMetadata();
+      final service = ApiVideoService(transport: transport.call);
+      final item = subject();
+      final old = service.prefetchCatalog(item);
+      item.airDate = '2025-01-01';
+      final fresh = service.prefetchCatalog(item);
+      expect(transport.requests, hasLength(6));
+      for (final request in transport.requests) {
+        request.response.complete(
+          document([
+            row(id: '2025', year: '2025'),
+            row(id: '2024', year: '2024'),
+          ]),
+        );
+      }
+      await Future.wait([old, fresh]);
+      expect((await service.loadCatalog(item)).id, '2025');
+      item.airDate = '2024-01-01';
+      expect((await service.loadCatalog(item)).id, '2024');
+      expect(transport.requests, hasLength(6));
+    },
+  );
+
+  test(
+    'different capped keyword order cannot share a negative cache entry',
+    () async {
+      final queried = <String>[];
+      final service = ApiVideoService(
+        transport: (uri, token) async {
+          final keyword = uri.queryParameters['wd']!;
+          queried.add(keyword);
+          return document(keyword == '别名六' ? [row(id: 'found')] : []);
+        },
+      );
+      final aliases = ['别名一', '别名二', '别名三', '别名四', '别名五', '别名六'];
+      await service.prefetchCatalog(subject(aliases: aliases));
+      expect(queried, isNot(contains('别名六')));
+      await expectLater(
+        service.loadCatalog(subject(aliases: aliases)),
+        throwsA(isA<ApiVideoUnavailableException>()),
+      );
+      final catalog = await service.loadCatalog(
+        subject(aliases: aliases.reversed.toList()),
+      );
+      expect(catalog.id, 'found');
+      expect(catalog.provider, ApiVideoProvider.zy1080);
+      expect(queried, contains('别名六'));
+    },
+  );
+
+  test(
+    'completed metadata cache is bounded and evicts the least recently used subject',
+    () async {
+      final calls = <String, int>{};
+      final service = ApiVideoService(
+        maxCachedProviders: 6,
+        transport: (uri, token) async {
+          final name = uri.queryParameters['wd']!;
+          calls.update(name, (value) => value + 1, ifAbsent: () => 1);
+          return document([row(name: name)]);
+        },
+      );
+      final first = subject(id: 1, name: '动画1');
+      final second = subject(id: 2, name: '动画2');
+      final third = subject(id: 3, name: '动画3');
+      await service.prefetchCatalog(first);
+      await service.prefetchCatalog(second);
+      await service.loadCatalog(first);
+      await service.prefetchCatalog(third);
+      await service.prefetchCatalog(first);
+      expect(calls['动画1'], 3);
+      await service.prefetchCatalog(second);
+      expect(calls['动画2'], 6);
+    },
+  );
+}
+
+const _providerHosts = ['api.yzzy-api.com', 'bfzyapi.com', 'cj.lziapi.com'];
+
+Future<void> _flushEvents() => Future<void>.delayed(Duration.zero);
+
+class _MetadataRequest {
+  _MetadataRequest(this.uri, this.token);
+  final Uri uri;
+  final CancelToken token;
+  final response = Completer<Object?>();
+}
+
+class _ControlledMetadata {
+  final requests = <_MetadataRequest>[];
+
+  Future<Object?> call(Uri uri, CancelToken? token) {
+    final request = _MetadataRequest(uri, token!);
+    requests.add(request);
+    return request.response.future;
+  }
+
+  void completeAll() {
+    for (final request in requests) {
+      if (!request.response.isCompleted) {
+        request.response.complete(document([row()]));
+      }
+    }
+  }
 }

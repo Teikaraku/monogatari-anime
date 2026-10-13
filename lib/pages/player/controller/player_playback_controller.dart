@@ -71,6 +71,7 @@ abstract class _PlayerPlaybackController with Store {
   final bool Function(String error)? onPlaybackError;
   late final PlaybackCachePolicy cachePolicy = PlaybackCachePolicy(
     isLocalPlayback: isLocalPlayback,
+    isTorrentStream: () => _torrentStream,
     currentPlayer: () => mediaPlayer,
   );
 
@@ -80,6 +81,7 @@ abstract class _PlayerPlaybackController with Store {
 
   final AsyncSerialQueue _prefetchWrites = AsyncSerialQueue();
   bool _prefetchSuspendWanted = false;
+  bool _torrentStream = false;
 
   bool hAenable = true;
   late String hardwareDecoder;
@@ -276,7 +278,9 @@ abstract class _PlayerPlaybackController with Store {
     required bool Function() canInstall,
     int offset = 0,
     VideoSourceFormat videoSourceFormat = VideoSourceFormat.auto,
+    bool isTorrentStream = false,
   }) async {
+    _torrentStream = isTorrentStream;
     startOffset = offset;
     superResolutionMode = SuperResolutionMode.fromStorageValue(
       GStorage.getSetting(SettingsKeys.defaultSuperResolutionMode),
@@ -334,6 +338,10 @@ abstract class _PlayerPlaybackController with Store {
         return await _discardIfNotCurrent(candidate);
       }
       await pp.setProperty("af", "scaletempo2=max-speed=8");
+      if (isTorrentStream) {
+        await pp.setProperty('cache-on-disk', 'no');
+        await pp.setProperty('network-timeout', '90');
+      }
       if (!isCurrentPlayer(player)) {
         return await _discardIfNotCurrent(candidate);
       }
@@ -353,7 +361,9 @@ abstract class _PlayerPlaybackController with Store {
       }
 
       final bool proxyEnable = GStorage.getSetting(SettingsKeys.proxyEnable);
-      if (proxyEnable) {
+      if (isTorrentStream) {
+        await pp.setProperty('http-proxy', '');
+      } else if (proxyEnable) {
         final String proxyUrl = GStorage.getSetting(SettingsKeys.proxyUrl);
         final formattedProxy = ProxyUtils.getFormattedProxyUrl(proxyUrl);
         if (formattedProxy != null) {

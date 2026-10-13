@@ -5,6 +5,7 @@ analyzer:
     - .cache/**
     - .dart_tool/**
     - build/**
+    - vendor/**
     - fastlane/**
     - lib/bbcode/generated/**
     - "**/*.g.dart"

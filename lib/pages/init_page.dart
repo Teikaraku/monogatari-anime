@@ -27,6 +27,7 @@ class InitPage extends StatefulWidget {
     required this.myController,
     required this.downloadController,
     required this.danmakuShieldSync,
+    this.initializeSubscriptions,
   });
 
   final CollectController collectController;
@@ -34,6 +35,7 @@ class InitPage extends StatefulWidget {
   final MyController myController;
   final DownloadController downloadController;
   final DanmakuShieldSyncService danmakuShieldSync;
+  final Future<void> Function()? initializeSubscriptions;
 
   @override
   State<InitPage> createState() => _InitPageState();
@@ -58,6 +60,11 @@ class _InitPageState extends State<InitPage> {
     unawaited(myController.loadShieldList());
     _webDavInit();
     _bangumiInit();
+    unawaited(
+      widget.initializeSubscriptions?.call().catchError((Object error) {
+        KazumiLogger().w('InitPage: RSS initialization failed', error: error);
+      }),
+    );
     try {
       await downloadController.init();
       _setupBackgroundDownloadNavigation();

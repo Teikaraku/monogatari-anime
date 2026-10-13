@@ -35,7 +35,8 @@ class CollectLibraryView extends StatefulWidget {
     required this.layout,
     required this.onLayoutChanged,
     this.progress = const {},
-    this.onResume,
+    this.onPlay,
+    this.onPickEpisode,
   });
 
   final List<CollectedBangumi> entries;
@@ -49,8 +50,11 @@ class CollectLibraryView extends StatefulWidget {
   /// Watch and airing progress by subject id; missing for shows without any.
   final Map<int, CollectProgress> progress;
 
-  /// Resumes the latest watch record of a show.
-  final ValueChanged<BangumiItem>? onResume;
+  /// Resumes the latest watch record of a show, or starts it.
+  final ValueChanged<BangumiItem>? onPlay;
+
+  /// Opens the episode picker of a show.
+  final ValueChanged<BangumiItem>? onPickEpisode;
 
   @override
   State<CollectLibraryView> createState() => _CollectLibraryViewState();
@@ -365,7 +369,7 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
                     inset, 0, inset, 24 + MediaQuery.paddingOf(context).bottom),
                 sliver: widget.layout == CollectLayout.cards
                     ? _grid(entries, contentWidth, type: type)
-                    : _list(entries, contentWidth),
+                    : _list(entries, contentWidth, type: type),
               ),
           ],
         ),
@@ -373,7 +377,8 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
     });
   }
 
-  Widget _list(List<CollectedBangumi> entries, double contentWidth) {
+  Widget _list(List<CollectedBangumi> entries, double contentWidth,
+      {required CollectType? type}) {
     const spacing = 12.0;
     final textScale = (MediaQuery.textScalerOf(context).scale(14) / 14)
         .clamp(1.0, double.infinity);
@@ -391,10 +396,13 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
             key: ValueKey('collect-${entries[index].bangumiItem.id}'),
             entry: entries[index],
             showRating: widget.showRating,
+            showStatus: type == null,
             progress: widget.progress[entries[index].bangumiItem.id],
             onOpen: () => widget.onOpen(entries[index].bangumiItem),
             onChangeType: _changeTypeFor(entries[index]),
-            onResume: _resumeFor(entries[index]),
+            onPlay: _playFor(entries[index]),
+            playLabel: _playLabelFor(entries[index]),
+            onPickEpisode: _pickEpisodeFor(entries[index]),
           ),
         );
 
@@ -431,12 +439,18 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
           ? (type) => widget.onChangeType(entry.bangumiItem, type)
           : null;
 
-  VoidCallback? _resumeFor(CollectedBangumi entry) {
-    final onResume = widget.onResume;
-    final watched = widget.progress[entry.bangumiItem.id]?.history != null;
-    return onResume == null || !watched
-        ? null
-        : () => onResume(entry.bangumiItem);
+  VoidCallback? _playFor(CollectedBangumi entry) {
+    final onPlay = widget.onPlay;
+    return onPlay == null ? null : () => onPlay(entry.bangumiItem);
+  }
+
+  /// Shows with a watch record resume; the rest start.
+  String _playLabelFor(CollectedBangumi entry) =>
+      widget.progress[entry.bangumiItem.id]?.history != null ? '继续看' : '开始观看';
+
+  VoidCallback? _pickEpisodeFor(CollectedBangumi entry) {
+    final onPickEpisode = widget.onPickEpisode;
+    return onPickEpisode == null ? null : () => onPickEpisode(entry.bangumiItem);
   }
 
   Widget _grid(List<CollectedBangumi> entries, double contentWidth,
@@ -468,7 +482,9 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
         progress: widget.progress[entries[index].bangumiItem.id],
         onOpen: () => widget.onOpen(entries[index].bangumiItem),
         onChangeType: _changeTypeFor(entries[index]),
-        onResume: _resumeFor(entries[index]),
+        onPlay: _playFor(entries[index]),
+        playLabel: _playLabelFor(entries[index]),
+        onPickEpisode: _pickEpisodeFor(entries[index]),
       ),
     );
   }

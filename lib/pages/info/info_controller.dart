@@ -70,6 +70,8 @@ abstract class _InfoController with Store {
     } else {
       // The detail page of another subject may have taken over meanwhile.
       if (bangumiItem.id != id) return detail;
+      bangumiItem.name = value.name;
+      bangumiItem.nameCn = value.nameCn;
       bangumiItem.summary = value.summary;
       bangumiItem.tags = value.tags;
       bangumiItem.rank = value.rank;
@@ -90,9 +92,9 @@ abstract class _InfoController with Store {
 
   Future<void> queryBangumiCharactersByID(int id) async {
     characterList.clear();
-    await BangumiApi.getCharatersByBangumiID(id).then((value) {
-      characterList.addAll(value.charactersList);
-    });
+    final value = await BangumiApi.getCharatersByBangumiID(id);
+    if (bangumiItem.id != id) return;
+    characterList.addAll(value.charactersList);
     Map<String, int> relationValue = {
       '主角': 1,
       '配角': 2,
@@ -114,9 +116,9 @@ abstract class _InfoController with Store {
 
   Future<void> queryBangumiStaffsByID(int id) async {
     staffList.clear();
-    await BangumiApi.getBangumiStaffByID(id).then((value) {
-      staffList.addAll(value.data);
-    });
+    final value = await BangumiApi.getBangumiStaffByID(id);
+    if (bangumiItem.id != id) return;
+    staffList.addAll(value.data);
     KazumiLogger()
         .i('InfoController: loaded staff list length ${staffList.length}');
   }

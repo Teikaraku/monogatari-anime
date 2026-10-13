@@ -211,6 +211,42 @@ mixin _$VideoPageController on _VideoPageController, Store {
     });
   }
 
+  late final _$playbackSourceAtom = Atom(
+    name: '_VideoPageController.playbackSource',
+    context: context,
+  );
+
+  @override
+  String get playbackSource {
+    _$playbackSourceAtom.reportRead();
+    return super.playbackSource;
+  }
+
+  @override
+  set playbackSource(String value) {
+    _$playbackSourceAtom.reportWrite(value, super.playbackSource, () {
+      super.playbackSource = value;
+    });
+  }
+
+  late final _$playbackStatusAtom = Atom(
+    name: '_VideoPageController.playbackStatus',
+    context: context,
+  );
+
+  @override
+  String get playbackStatus {
+    _$playbackStatusAtom.reportRead();
+    return super.playbackStatus;
+  }
+
+  @override
+  set playbackStatus(String value) {
+    _$playbackStatusAtom.reportWrite(value, super.playbackStatus, () {
+      super.playbackStatus = value;
+    });
+  }
+
   late final _$_VideoPageControllerActionController = ActionController(
     name: '_VideoPageController',
     context: context,
@@ -351,7 +387,9 @@ isCommentsAscending: ${isCommentsAscending},
 isPip: ${isPip},
 historyOffset: ${historyOffset},
 isOfflineMode: ${isOfflineMode},
-roadList: ${roadList}
+roadList: ${roadList},
+playbackSource: ${playbackSource},
+playbackStatus: ${playbackStatus}
     ''';
   }
 }

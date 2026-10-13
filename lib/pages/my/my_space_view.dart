@@ -12,6 +12,8 @@ enum MyDestination {
   danmaku,
   history,
   downloads,
+  subscriptions,
+  torrentTasks,
   stats,
   sync,
   storage,
@@ -25,6 +27,7 @@ abstract final class _Tint {
   static const indigo = Color(0xFF5856D6);
   static const teal = Color(0xFF30B0C7);
   static const purple = Color(0xFFAF52DE);
+  static const orange = Color(0xFFFF9500);
   static const gray = Color(0xFF8E8E93);
 }
 
@@ -71,6 +74,20 @@ class MySpaceView extends StatelessWidget {
                   Icons.download_rounded,
                   monogatariPink,
                   MyDestination.downloads,
+                ),
+                _entry(
+                  'RSS 订阅',
+                  '订阅番组与字幕组更新',
+                  Icons.rss_feed_rounded,
+                  _Tint.orange,
+                  MyDestination.subscriptions,
+                ),
+                _entry(
+                  '磁力任务',
+                  '查看缓冲与下载进度',
+                  Icons.downloading_rounded,
+                  _Tint.teal,
+                  MyDestination.torrentTasks,
                 ),
                 _entry(
                   '观看统计',

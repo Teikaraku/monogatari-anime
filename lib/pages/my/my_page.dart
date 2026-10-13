@@ -58,6 +58,8 @@ class _MyPageState extends State<MyPage> {
         MyDestination.danmaku => '/settings/danmaku/',
         MyDestination.history => '/settings/history/',
         MyDestination.downloads => '/settings/download/',
+        MyDestination.subscriptions => '/subscriptions/',
+        MyDestination.torrentTasks => '/torrent-tasks/',
         MyDestination.stats => '/settings/history/stats',
         MyDestination.sync => '/settings/sync',
         MyDestination.storage => '/settings/storage',

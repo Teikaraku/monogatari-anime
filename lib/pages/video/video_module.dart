@@ -13,7 +13,7 @@ final videoModule = createModule(
     c.route(
       '/',
       provide: (s) => s
-        ..add<VideoPageController>(VideoPageController.new)
+        ..add<VideoPageController>(VideoPageController.withRss)
         ..add<PlayerController>(PlayerController.new),
       child: (context, state) {
         final args = state.arguments;

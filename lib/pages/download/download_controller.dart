@@ -116,20 +116,11 @@ abstract class _DownloadController with Store {
     if (_isBackgroundServiceInitialized) return;
 
     await _backgroundService.init();
-    _backgroundService.onPauseAll = pauseAllDownloads;
-    _backgroundService.addTaskDataCallback(_onTaskData);
+    _backgroundService.registerOwner(
+      BackgroundDownloadOwner.http,
+      onPause: pauseAllDownloads,
+    );
     _isBackgroundServiceInitialized = true;
-  }
-
-  void _onTaskData(Object data) {
-    if (data is Map) {
-      final action = data['action'];
-      if (action == 'button_pressed') {
-        _backgroundService.handleNotificationAction(data['id'] as String);
-      } else if (action == 'navigate_to_download') {
-        _backgroundService.handleNavigateToDownload();
-      }
-    }
   }
 
   final Map<String, double> _speeds = {};
@@ -184,11 +175,11 @@ abstract class _DownloadController with Store {
   }
 
   Future<void> _updateBackgroundNotification() async {
-    if (!_backgroundService.isRunning) return;
+    if (!_backgroundService.isSupported) return;
 
     final stats = _getDownloadStats();
     if (!stats.hasWork) {
-      await _backgroundService.stopService();
+      await _backgroundService.stopService(owner: BackgroundDownloadOwner.http);
       return;
     }
 
@@ -202,13 +193,16 @@ abstract class _DownloadController with Store {
       totalCount: stats.totalCount,
       overallProgress: stats.overallProgress,
       speedText: formatSpeed(totalSpeed),
+      bytesPerSecond: totalSpeed,
     );
   }
 
   Future<void> _startBackgroundServiceIfNeeded() async {
-    if (!_backgroundService.isSupported || _backgroundService.isRunning) return;
+    if (!_backgroundService.isSupported) return;
 
-    final started = await _backgroundService.startService();
+    final started = await _backgroundService.startService(
+      owner: BackgroundDownloadOwner.http,
+    );
     if (started) {
       KazumiLogger().i('DownloadController: background service started');
     }
@@ -526,6 +520,7 @@ abstract class _DownloadController with Store {
     required ApiVideoEpisode episode,
     required int episodeNumber,
   }) async {
+    await _backgroundService.resumeForUser();
     final recordKey = '${apiPlaybackLibraryName}_${subject.id}';
     final record =
         _repository.getRecord(recordKey) ??
@@ -898,7 +893,7 @@ abstract class _DownloadController with Store {
 
     refreshRecords();
 
-    await _backgroundService.stopService();
+    await _backgroundService.stopService(owner: BackgroundDownloadOwner.http);
   }
 
   Future<void> retryDownload({
@@ -917,6 +912,7 @@ abstract class _DownloadController with Store {
     required int episodeNumber,
     bool priority = false,
   }) async {
+    await _backgroundService.resumeForUser();
     final recordKey = '${pluginName}_$bangumiId';
     final record = _repository.getRecord(recordKey);
     final storedEpisode = record?.episodes[episodeNumber];

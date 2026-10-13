@@ -6,10 +6,16 @@ import 'package:hive_ce/hive.dart';
 import 'package:kazumi/app_module.dart';
 import 'package:kazumi/core_module.dart';
 import 'package:kazumi/pages/download/download_controller.dart';
+import 'package:kazumi/pages/video/video_controller.dart';
 import 'package:kazumi/repositories/history_repository.dart';
 import 'package:kazumi/services/api_video/api_video_service.dart';
 import 'package:kazumi/services/download/download_manager.dart';
 import 'package:kazumi/services/player/history_playback_service.dart';
+import 'package:kazumi/services/player/playback_source_preferences.dart';
+import 'package:kazumi/services/rss/rss_playback_resolver.dart';
+import 'package:kazumi/services/rss/rss_subscription_service.dart';
+import 'package:kazumi/services/torrent/torrent_service.dart';
+import 'package:kazumi/services/torrent/torrent_background_coordinator.dart';
 import 'package:kazumi/services/storage/storage.dart';
 import 'package:logger/logger.dart';
 import 'package:path/path.dart' as path;
@@ -56,6 +62,18 @@ void main() {
       expect(boot.injector.get<IDownloadManager>(), same(downloader));
       expect(boot.injector.get<IHistoryRepository>(), isA<HistoryRepository>());
       expect(boot.injector.get<ApiVideoService>(), isA<ApiVideoService>());
+      final preferences = boot.injector.get<PlaybackSourcePreferences>();
+      expect(boot.injector.get<PlaybackSourcePreferences>(), same(preferences));
+      final rss = boot.injector.get<RssPlaybackResolver>();
+      expect(
+        rss.subscriptions,
+        same(boot.injector.get<RssSubscriptionService>()),
+      );
+      expect(rss.torrents, same(boot.injector.get<TorrentService>()));
+      expect(
+        boot.injector.get<TorrentBackgroundCoordinator>().torrents,
+        same(rss.torrents),
+      );
       expect(
         boot.injector.get<DownloadController>(),
         isA<DownloadController>(),
@@ -79,6 +97,26 @@ void main() {
         boot.injector.get<DownloadController>(),
         isA<DownloadController>(),
       );
+    },
+  );
+  test(
+    'RSS player constructor resolves the real scoped dependency signature',
+    () {
+      final boot = bootstrapModule(
+        createModule(
+          register: (c) {
+            c.module(coreModule);
+            c.add<VideoPageController>(VideoPageController.withRss);
+          },
+        ),
+      );
+      addTearDown(boot.injector.dispose);
+      final player = boot.injector.get<VideoPageController>();
+      expect(
+        player.rssPlayback,
+        same(boot.injector.get<RssPlaybackResolver>()),
+      );
+      player.dispose();
     },
   );
 }

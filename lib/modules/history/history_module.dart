@@ -1,5 +1,6 @@
 import 'package:hive_ce/hive.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
+import 'package:kazumi/utils/episode_url.dart';
 
 part 'history_module.g.dart';
 
@@ -109,6 +110,10 @@ class History {
 
   String get key => scopedKey(adapterName, bangumiItem, entryKind);
 
+  /// 第 N 话 of the latest playback; [lastWatchEpisode] is a list position.
+  int get watchedEpisodeNumber =>
+      episodeNumberFromPageUrl(episodePageUrl) ?? lastWatchEpisode;
+
   History(
     this.bangumiItem,
     this.lastWatchEpisode,
@@ -168,6 +173,9 @@ class Progress {
     this.updatedAtMs = 0,
     this.episodePageUrl = '',
   });
+
+  /// 第 N 话 of this record; [episode] is a list position.
+  int get episodeNumber => episodeNumberFromPageUrl(episodePageUrl) ?? episode;
 
   int effectiveUpdatedAtMs(DateTime fallback) {
     return updatedAtMs > 0 ? updatedAtMs : fallback.millisecondsSinceEpoch;

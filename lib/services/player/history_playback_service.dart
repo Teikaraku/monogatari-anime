@@ -46,12 +46,31 @@ class HistoryPlaybackService {
 
     final episode = history.lastWatchEpisode > 0 ? history.lastWatchEpisode : 1;
     final seconds = history.progresses[episode]?.progress.inSeconds ?? 0;
+    final key = _stableEpisodeKey(
+      history.episodePageUrl,
+      history.bangumiItem.id,
+    );
+    final torrentMatch = RegExp(
+      r'^torrent:([a-fA-F0-9]{40}):(0|[1-9][0-9]*)$',
+    ).firstMatch(key ?? '');
+    final fileIndex = torrentMatch == null
+        ? null
+        : int.tryParse(torrentMatch[2]!);
+    final taskId = fileIndex == null ? null : torrentMatch![1]!.toLowerCase();
+    final isRssSpecial =
+        key != null &&
+        key.startsWith('rss-special:') &&
+        key.length > 'rss-special:'.length;
     return HistoryPlaybackReady(
       OnlineVideoPlaybackArgs(
         bangumiItem: history.bangumiItem,
         initialEpisode: episode,
         initialOffset: seconds > 0 ? seconds : 0,
         initialEpisodePageUrl: history.episodePageUrl,
+        playbackSource: taskId != null || isRssSpecial ? 'rss' : null,
+        rememberPlaybackSource: false,
+        torrentTaskId: taskId,
+        torrentFileIndex: fileIndex,
       ),
     );
   }
@@ -105,5 +124,25 @@ class HistoryPlaybackService {
       road: targetEpisode.road,
       downloadedEpisodes: downloadedEpisodes,
     );
+  }
+}
+
+String? _stableEpisodeKey(String value, int subjectId) {
+  try {
+    final uri = Uri.tryParse(value);
+    if (uri == null ||
+        uri.scheme != 'monogatari' ||
+        uri.host != 'episode' ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasPort ||
+        uri.hasQuery ||
+        uri.hasFragment) {
+      return null;
+    }
+    final segments = uri.pathSegments;
+    if (segments.length != 2 || segments.first != '$subjectId') return null;
+    return segments[1];
+  } on FormatException {
+    return null;
   }
 }

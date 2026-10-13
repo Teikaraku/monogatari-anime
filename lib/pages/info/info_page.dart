@@ -16,9 +16,11 @@ import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/modules/bangumi/bangumi_subject_detail.dart';
 import 'package:kazumi/modules/bangumi/episode_item.dart';
 import 'package:kazumi/pages/info/info_actions_menu.dart';
+import 'package:kazumi/pages/info/info_catalog_prefetch.dart';
 import 'package:kazumi/pages/info/info_controller.dart';
 import 'package:kazumi/pages/info/info_tabview.dart';
 import 'package:kazumi/pages/video/video_playback_args.dart';
+import 'package:kazumi/services/api_video/api_video_service.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/services/platform/desktop_window_config.dart';
 import 'package:kazumi/services/storage/storage.dart';
@@ -46,6 +48,13 @@ class _InfoPageState extends State<InfoPage>
   );
 
   InfoController get infoController => widget.infoController;
+  late final _catalogPrefetch = InfoCatalogPrefetch(
+    (subject, cancellation) => inject<ApiVideoService>().prefetchCatalog(
+      subject,
+      cancelToken: cancellation,
+    ),
+  );
+  late int _subjectRevision;
   late final TabController infoTabController;
   late final bool showRating;
 
@@ -75,16 +84,16 @@ class _InfoPageState extends State<InfoPage>
 
   Future<void> loadCharacters() async {
     if (charactersIsLoading) return;
+    final id = infoController.bangumiItem.id;
+    final revision = _subjectRevision;
     setState(() {
       charactersIsLoading = true;
       charactersQueryTimeout = false;
       charactersIsEmpty = false;
     });
     try {
-      await infoController.queryBangumiCharactersByID(
-        infoController.bangumiItem.id,
-      );
-      if (mounted) {
+      await infoController.queryBangumiCharactersByID(id);
+      if (_isCurrentSubject(id, revision)) {
         setState(() {
           charactersIsLoading = false;
           if (infoController.characterList.isEmpty) {
@@ -94,7 +103,7 @@ class _InfoPageState extends State<InfoPage>
       }
     } catch (e) {
       KazumiLogger().e('InfoPage: failed to load characters', error: e);
-      if (mounted) {
+      if (_isCurrentSubject(id, revision)) {
         setState(() {
           charactersIsLoading = false;
           charactersQueryTimeout = true;
@@ -105,16 +114,16 @@ class _InfoPageState extends State<InfoPage>
 
   Future<void> loadStaff() async {
     if (staffIsLoading) return;
+    final id = infoController.bangumiItem.id;
+    final revision = _subjectRevision;
     setState(() {
       staffIsLoading = true;
       staffQueryTimeout = false;
       staffIsEmpty = false;
     });
     try {
-      await infoController.queryBangumiStaffsByID(
-        infoController.bangumiItem.id,
-      );
-      if (mounted) {
+      await infoController.queryBangumiStaffsByID(id);
+      if (_isCurrentSubject(id, revision)) {
         setState(() {
           staffIsLoading = false;
           if (infoController.staffList.isEmpty) {
@@ -124,7 +133,7 @@ class _InfoPageState extends State<InfoPage>
       }
     } catch (e) {
       KazumiLogger().e('InfoPage: failed to load staff', error: e);
-      if (mounted) {
+      if (_isCurrentSubject(id, revision)) {
         setState(() {
           staffIsLoading = false;
           staffQueryTimeout = true;
@@ -144,11 +153,11 @@ class _InfoPageState extends State<InfoPage>
   }
 
   Future<void> loadEpisodes() async {
+    final id = infoController.bangumiItem.id;
+    final revision = _subjectRevision;
     try {
-      final episodes = await infoController.queryBangumiMainEpisodesByID(
-        infoController.bangumiItem.id,
-      );
-      if (mounted) {
+      final episodes = await infoController.queryBangumiMainEpisodesByID(id);
+      if (_isCurrentSubject(id, revision)) {
         setState(() {
           _episodes = episodes;
           _episodesFailed = false;
@@ -156,7 +165,7 @@ class _InfoPageState extends State<InfoPage>
       }
     } catch (e) {
       KazumiLogger().e('InfoPage: failed to load episodes', error: e);
-      if (mounted) setState(() => _episodesFailed = true);
+      if (_isCurrentSubject(id, revision)) setState(() => _episodesFailed = true);
     }
   }
 
@@ -171,19 +180,44 @@ class _InfoPageState extends State<InfoPage>
   @override
   void initState() {
     super.initState();
+    _initializeSubject();
+    infoTabController = TabController(length: _infoTabs.length, vsync: this);
+    showRating = GStorage.getSetting(SettingsKeys.showRating);
+    infoTabController.addListener(onInfoTabChanged);
+  }
+
+  void _initializeSubject() {
+    _subjectRevision = _catalogPrefetch.beginSubject(widget.inputBangumiItem.id);
     infoController.bangumiItem = widget.inputBangumiItem;
     infoController.characterList.clear();
     infoController.staffList.clear();
     infoController.clearRelations();
+    _subjectDetail = null;
+    _detailLoading = true;
+    _episodes = null;
+    _episodesFailed = false;
+    charactersIsLoading = false;
+    charactersQueryTimeout = false;
+    charactersIsEmpty = false;
+    staffIsLoading = false;
+    staffQueryTimeout = false;
+    staffIsEmpty = false;
     // Always fetch the subject: the detail fields come only from this request.
     final needsRefresh = _needsBangumiInfoRefresh(infoController.bangumiItem);
     _showBangumiInfoSkeleton = needsRefresh;
     _loadBangumiInfo(showSkeleton: needsRefresh);
     loadEpisodes();
     loadRelations();
-    infoTabController = TabController(length: _infoTabs.length, vsync: this);
-    showRating = GStorage.getSetting(SettingsKeys.showRating);
-    infoTabController.addListener(onInfoTabChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant InfoPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.inputBangumiItem.id != widget.inputBangumiItem.id ||
+        oldWidget.infoController != widget.infoController) {
+      _initializeSubject();
+      infoTabController.index = 0;
+    }
   }
 
   void onInfoTabChanged() {
@@ -204,6 +238,7 @@ class _InfoPageState extends State<InfoPage>
 
   @override
   void dispose() {
+    _catalogPrefetch.dispose();
     infoTabController.removeListener(onInfoTabChanged);
     infoController.characterList.clear();
     infoController.staffList.clear();
@@ -215,22 +250,29 @@ class _InfoPageState extends State<InfoPage>
   Future<void> _loadBangumiInfo({required bool showSkeleton}) async {
     final loadingStartedAt = DateTime.now();
     final id = infoController.bangumiItem.id;
+    final revision = _subjectRevision;
     BangumiSubjectDetail? detail;
     try {
       // Attach metadata without replacing rendered image URLs.
       detail = showSkeleton
           ? await infoController.queryBangumiInfoByID(id, type: 'attach')
           : await infoController.refreshBangumiInfoByID(id);
+      if (detail != null && _isCurrentSubject(id, revision)) {
+        _catalogPrefetch.afterDetailsApplied(
+          revision,
+          infoController.bangumiItem,
+        );
+      }
     } catch (e) {
       KazumiLogger().e(
         'InfoPage: failed to query bangumi info by ID',
         error: e,
       );
     } finally {
-      if (mounted && showSkeleton) {
+      if (_isCurrentSubject(id, revision) && showSkeleton) {
         await _waitForMinimumBangumiInfoLoadingDuration(loadingStartedAt);
       }
-      if (mounted) {
+      if (_isCurrentSubject(id, revision)) {
         setState(() {
           _showBangumiInfoSkeleton = false;
           _subjectDetail = detail;
@@ -239,6 +281,9 @@ class _InfoPageState extends State<InfoPage>
       }
     }
   }
+
+  bool _isCurrentSubject(int id, int revision) =>
+      mounted && _catalogPrefetch.isCurrent(revision, id);
 
   Future<void> _waitForMinimumBangumiInfoLoadingDuration(
     DateTime loadingStartedAt,
@@ -285,6 +330,14 @@ class _InfoPageState extends State<InfoPage>
                   ),
                 ),
                 actions: [
+                  IconButton(
+                    tooltip: 'RSS 订阅与播放',
+                    icon: const Icon(Icons.rss_feed_rounded),
+                    onPressed: () => context.pushNamed(
+                      '/subscriptions/',
+                      arguments: infoController.bangumiItem,
+                    ),
+                  ),
                   if (innerBoxIsScrolled)
                     EmbeddedNativeControlArea(
                       child: CollectButton(

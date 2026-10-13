@@ -78,3 +78,15 @@ String normalizeEpisodeUrl(String baseUrl, String raw) {
 }
 
 bool _isHttpScheme(String scheme) => scheme == 'http' || scheme == 'https';
+
+/// 在线播放记录的集身份 `monogatari://episode/<条目>/<集号>` 里的集号。
+///
+/// 播放记录按"列表第几项"存，片源把番外排在前面时，位置和集号对不上；
+/// 显示"第 N 话"时以这里解析出的集号为准。其他 URL 或没有集号的番外返回 null。
+int? episodeNumberFromPageUrl(String pageUrl) {
+  const prefix = 'monogatari://episode/';
+  if (!pageUrl.startsWith(prefix)) return null;
+  final key =
+      Uri.decodeComponent(pageUrl.substring(pageUrl.lastIndexOf('/') + 1));
+  return int.tryParse(key);
+}

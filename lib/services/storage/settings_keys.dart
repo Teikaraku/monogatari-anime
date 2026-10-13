@@ -42,6 +42,32 @@ class SettingKey<T> {
 // Add new settings here. SettingsKeys is the public typed registry used by
 // callers; new keys can use literal string names directly.
 class SettingsKeys {
+  static const playbackSource = SettingKey<String>(
+    'playbackSource',
+    'api',
+    group: SettingGroup.player,
+  );
+  static const subjectPlaybackSources = SettingKey<Map<dynamic, dynamic>>(
+    'subjectPlaybackSources',
+    <dynamic, dynamic>{},
+    group: SettingGroup.player,
+  );
+  static const rssDownloadWhilePlaying = SettingKey<bool>(
+    'rssDownloadWhilePlaying',
+    false,
+    group: SettingGroup.player,
+  );
+  static const rssFallbackToApi = SettingKey<bool>(
+    'rssFallbackToApi',
+    true,
+    group: SettingGroup.player,
+  );
+  static const rssWifiOnly = SettingKey<bool>(
+    'rssWifiOnly',
+    true,
+    group: SettingGroup.player,
+  );
+
   static const hAenable = SettingKey<bool>(
     _SettingBoxKey.hAenable,
     true,
@@ -571,6 +597,11 @@ class SettingsKeys {
   );
 
   static final List<SettingKey<Object?>> all = [
+    playbackSource,
+    subjectPlaybackSources,
+    rssDownloadWhilePlaying,
+    rssFallbackToApi,
+    rssWifiOnly,
     hAenable,
     hardwareDecoder,
     searchEnhanceEnable,
@@ -680,7 +711,7 @@ class SettingsKeys {
   static List<SettingKey<Object?>> byGroup(SettingGroup group) {
     return [
       for (final key in all)
-        if (key.group == group) key
+        if (key.group == group) key,
     ];
   }
 

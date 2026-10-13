@@ -4,6 +4,7 @@ class PlaybackInitParams {
   final String videoUrl;
   final int offset;
   final bool isLocalPlayback;
+  final bool isTorrentStream;
   final VideoSourceFormat videoSourceFormat;
   final int bangumiId;
   final String pluginName;
@@ -25,6 +26,7 @@ class PlaybackInitParams {
     required this.videoUrl,
     required this.offset,
     required this.isLocalPlayback,
+    this.isTorrentStream = false,
     required this.bangumiId,
     required this.pluginName,
     required this.episode,

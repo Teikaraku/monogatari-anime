@@ -22,6 +22,12 @@ import 'package:kazumi/pages/my/my_controller.dart';
 import 'package:kazumi/pages/download/download_controller.dart';
 import 'package:kazumi/services/shaders/shader_asset_service.dart';
 import 'package:kazumi/services/sync/danmaku_shield_sync_service.dart';
+import 'package:kazumi/modules/bangumi/bangumi_item.dart';
+import 'package:kazumi/pages/subscriptions/subscriptions_page.dart';
+import 'package:kazumi/pages/torrent/torrent_tasks_page.dart';
+import 'package:kazumi/services/rss/rss_subscription_service.dart';
+import 'package:kazumi/services/torrent/torrent_service.dart';
+import 'package:kazumi/services/torrent/torrent_background_coordinator.dart';
 
 final _tabTransition = CustomTransition(
   duration: const Duration(milliseconds: 70),
@@ -77,6 +83,12 @@ final indexModule = createModule(
           myController: inject<MyController>(),
           downloadController: inject<DownloadController>(),
           danmakuShieldSync: inject<DanmakuShieldSyncService>(),
+          initializeSubscriptions: () async {
+            inject<TorrentBackgroundCoordinator>().start();
+            final service = inject<RssSubscriptionService>();
+            await service.initialize();
+            await service.startAutoRefresh();
+          },
         ),
         transition: TransitionType.none,
       )
@@ -89,6 +101,23 @@ final indexModule = createModule(
       )
       ..module(tabModule)
       ..module(videoModule)
+      ..route(
+        '/subscriptions/',
+        child: (context, state) => SubscriptionsPage(
+          service: inject<RssSubscriptionService>(),
+          torrentService: inject<TorrentService>(),
+          subject: state.arguments is BangumiItem
+              ? state.arguments as BangumiItem
+              : null,
+        ),
+      )
+      ..route(
+        '/torrent-tasks/',
+        child: (context, state) => TorrentTasksPage(
+          service: inject<TorrentService>(),
+          subjectId: state.arguments is int ? state.arguments as int : null,
+        ),
+      )
       ..route(
         ImageViewer.routePath,
         child: (context, state) {

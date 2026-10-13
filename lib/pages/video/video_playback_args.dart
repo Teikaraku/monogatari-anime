@@ -16,10 +16,31 @@ class OnlineVideoPlaybackArgs extends VideoPlaybackArgs {
     this.initialEpisode,
     this.initialOffset,
     this.initialEpisodePageUrl,
+    this.startEpisodeNumber,
+    this.playbackSource,
+    this.rememberPlaybackSource = true,
+    this.rssReleaseId,
+    this.rssEpisodeNumber,
+    this.torrentTaskId,
+    this.torrentFileIndex,
   });
 
   final int? initialEpisode;
   final int? initialOffset;
+
+  /// A per-navigation choice; null follows the saved playback preference.
+  final String? playbackSource;
+
+  /// False for a source inferred from old history rather than a user choice.
+  final bool rememberPlaybackSource;
+  final String? rssReleaseId;
+  final double? rssEpisodeNumber;
+  final String? torrentTaskId;
+  final int? torrentFileIndex;
+
+  /// An episode the user picked by its number (第 N 话); plays it from the
+  /// start instead of resuming the watch history.
+  final int? startEpisodeNumber;
 
   /// Stable identity retained when a provider omits earlier episodes. Legacy
   /// website URLs allow the player to fall back to the saved list position.

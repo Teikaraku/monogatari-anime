@@ -66,6 +66,102 @@ void main() {
   });
 
   test(
+    'direct torrent file history restores its task, exact file and offset',
+    () async {
+      final taskId = 'a' * 40;
+      final page =
+          'monogatari://episode/42/${Uri.encodeComponent('torrent:$taskId:0')}';
+      final history = _history()
+        ..lastWatchEpisode = 3
+        ..episodePageUrl = page
+        ..progresses[3] = Progress(3, 0, 84500, episodePageUrl: page);
+      final args =
+          (await service.open(history) as HistoryPlaybackReady).args
+              as OnlineVideoPlaybackArgs;
+      expect(args.playbackSource, 'rss');
+      expect(args.rememberPlaybackSource, isFalse);
+      expect(args.torrentTaskId, taskId);
+      expect(args.torrentFileIndex, 0);
+      expect(args.initialEpisodePageUrl, page);
+      expect(args.initialEpisode, 3);
+      expect(args.initialOffset, 84);
+      expect(downloads.lookups, isEmpty);
+    },
+  );
+
+  test(
+    'torrent hash casing and nonzero file indices resolve to canonical tasks',
+    () async {
+      final history = _history()
+        ..episodePageUrl =
+            'monogatari://episode/42/${Uri.encodeComponent('torrent:${'AB' * 20}:17')}';
+      final args =
+          (await service.open(history) as HistoryPlaybackReady).args
+              as OnlineVideoPlaybackArgs;
+      expect(args.torrentTaskId, 'ab' * 20);
+      expect(args.torrentFileIndex, 17);
+      expect(args.playbackSource, 'rss');
+    },
+  );
+
+  test(
+    'special history forces RSS while ordinary episodes retain user source preference',
+    () async {
+      final history = _history()
+        ..episodePageUrl = 'monogatari://episode/42/rss-special%3Asp1';
+      final special =
+          (await service.open(history) as HistoryPlaybackReady).args
+              as OnlineVideoPlaybackArgs;
+      expect(special.playbackSource, 'rss');
+      expect(special.torrentTaskId, isNull);
+      history.episodePageUrl = 'monogatari://episode/42/2.5';
+      final ordinary =
+          (await service.open(history) as HistoryPlaybackReady).args
+              as OnlineVideoPlaybackArgs;
+      expect(ordinary.playbackSource, isNull);
+      expect(ordinary.torrentFileIndex, isNull);
+    },
+  );
+
+  test(
+    'malformed or different-subject identities cannot force torrent or special playback',
+    () async {
+      final hash = 'a' * 40;
+      final key = Uri.encodeComponent('torrent:$hash:2');
+      for (final page in [
+        'monogatari://episode/43/$key',
+        'monogatari://episode/042/$key',
+        'https://episode/42/$key',
+        'monogatari://other/42/$key',
+        'monogatari://user@episode/42/$key',
+        'monogatari://episode:1/42/$key',
+        'monogatari://episode/42/$key?extra=1',
+        'monogatari://episode/42/$key#extra',
+        'monogatari://episode/42/$key/',
+        'monogatari://episode/42/%FF',
+        'monogatari://episode/42/torrent%253A$hash%253A2',
+        'monogatari://episode/42/${Uri.encodeComponent('torrent:$hash:-1')}',
+        'monogatari://episode/42/${Uri.encodeComponent('torrent:$hash:2.5')}',
+        'monogatari://episode/42/${Uri.encodeComponent('torrent:$hash:02')}',
+        'monogatari://episode/42/${Uri.encodeComponent('torrent:$hash:${'9' * 40}')}',
+        'monogatari://episode/42/torrent%3Abadhash%3A2',
+        'monogatari://episode/43/rss-special%3Asp1',
+        'monogatari://episode/42/rss-special%3A',
+        'monogatari://[malformed',
+      ]) {
+        final history = _history()..episodePageUrl = page;
+        final args =
+            (await service.open(history) as HistoryPlaybackReady).args
+                as OnlineVideoPlaybackArgs;
+        expect(args.playbackSource, isNull, reason: page);
+        expect(args.torrentTaskId, isNull, reason: page);
+        expect(args.torrentFileIndex, isNull, reason: page);
+        expect(args.initialEpisodePageUrl, page);
+      }
+    },
+  );
+
+  test(
     'invalid legacy episode and negative progress use safe defaults',
     () async {
       final history = _history()

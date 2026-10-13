@@ -5,6 +5,7 @@ import 'package:flutter_mobx/flutter_mobx.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 
 import 'package:kazumi/bean/appbar/sys_app_bar.dart';
+import 'package:kazumi/bean/dialog/adaptive_bottom_sheet.dart';
 import 'package:kazumi/bean/dialog/dialog_helper.dart';
 import 'package:kazumi/modules/bangumi/airing_summary.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
@@ -18,7 +19,9 @@ import 'package:kazumi/modules/history/history_module.dart';
 import 'package:kazumi/pages/collect/collect_controller.dart';
 import 'package:kazumi/pages/collect/collect_library_view.dart';
 import 'package:kazumi/pages/collect/collect_sync_dialog.dart';
+import 'package:kazumi/pages/collect/episode_picker_sheet.dart';
 import 'package:kazumi/pages/history/history_controller.dart';
+import 'package:kazumi/pages/video/video_playback_args.dart';
 import 'package:kazumi/request/apis/airtime_api.dart';
 import 'package:kazumi/request/apis/main_episode_cache.dart';
 import 'package:kazumi/services/logging/logger.dart';
@@ -198,16 +201,63 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
     );
   }
 
-  Future<void> _resume(BangumiItem item) async {
-    if (_syncDialogOpen) return;
-    History? history;
+  /// The latest watch record of [item] across playback libraries.
+  History? _latestHistory(BangumiItem item) {
+    History? latest;
     for (final record in _historyController.histories) {
       if (record.bangumiItem.id == item.id &&
-          (history == null ||
-              record.lastWatchTime.isAfter(history.lastWatchTime))) {
-        history = record;
+          (latest == null ||
+              record.lastWatchTime.isAfter(latest.lastWatchTime))) {
+        latest = record;
       }
     }
+    return latest;
+  }
+
+  /// Resumes the watch record, or starts a show never played.
+  void _play(BangumiItem item) {
+    if (_syncDialogOpen) return;
+    if (_latestHistory(item) != null) {
+      unawaited(_resume(item));
+    } else {
+      context.pushNamed('/video/',
+          arguments: OnlineVideoPlaybackArgs(bangumiItem: item));
+    }
+  }
+
+  void _playEpisode(BangumiItem item, int number) {
+    if (_syncDialogOpen) return;
+    context.pushNamed('/video/',
+        arguments: OnlineVideoPlaybackArgs(
+          bangumiItem: item,
+          startEpisodeNumber: number,
+        ));
+  }
+
+  void _pickEpisode(BangumiItem item) {
+    if (_syncDialogOpen) return;
+    final watched = {
+      for (final record in _historyController.histories)
+        if (record.bangumiItem.id == item.id)
+          for (final progress in record.progresses.values)
+            progress.episodeNumber,
+    };
+    showAdaptiveBottomSheet<void>(
+      context: context,
+      maxHeightFactor: 0.8,
+      builder: (_) => EpisodePickerSheet(
+        bangumiItem: item,
+        watched: watched,
+        lastWatched: _latestHistory(item)?.watchedEpisodeNumber,
+        onPlay: (number) => _playEpisode(item, number),
+        onDetails: () => context.pushNamed('/info/', arguments: item),
+      ),
+    );
+  }
+
+  Future<void> _resume(BangumiItem item) async {
+    if (_syncDialogOpen) return;
+    final history = _latestHistory(item);
     if (history == null) return;
     final record = history;
     await dialogs.run((task) async {
@@ -298,7 +348,8 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
                   !_syncDialogOpen && !_pendingIds.contains(item.id),
               onOpen: (item) => context.pushNamed('/info/', arguments: item),
               onChangeType: (item, type) => unawaited(_changeType(item, type)),
-              onResume: (item) => unawaited(_resume(item)),
+              onPlay: _play,
+              onPickEpisode: _pickEpisode,
             );
           },
         ),

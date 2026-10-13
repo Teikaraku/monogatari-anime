@@ -10,13 +10,16 @@ class PlaybackCachePolicy {
   PlaybackCachePolicy({
     required bool Function() isLocalPlayback,
     required Player? Function() currentPlayer,
-  })  : _isLocalPlayback = isLocalPlayback,
-        _currentPlayer = currentPlayer;
+    bool Function()? isTorrentStream,
+  }) : _isLocalPlayback = isLocalPlayback,
+       _isTorrentStream = isTorrentStream ?? (() => false),
+       _currentPlayer = currentPlayer;
 
   static const int _lowMemoryBufferSize = 2 * 1024 * 1024;
   static const int _defaultBufferSize = 1500 * 1024 * 1024;
 
   final bool Function() _isLocalPlayback;
+  final bool Function() _isTorrentStream;
   final Player? Function() _currentPlayer;
   final AsyncSerialQueue _writes = AsyncSerialQueue();
 
@@ -27,12 +30,15 @@ class PlaybackCachePolicy {
       !_isLocalPlayback() &&
       MeteredNetworkService.isMetered;
 
-  int get bufferSize => LowMemoryMode.current.isEnabled(
+  int get bufferSize =>
+      LowMemoryMode.current.isEnabled(
         isMetered: MeteredNetworkService.isMetered,
         isLocalPlayback: _isLocalPlayback(),
       )
-          ? _lowMemoryBufferSize
-          : _defaultBufferSize;
+      ? _lowMemoryBufferSize
+      : _isTorrentStream()
+      ? 32 * 1024 * 1024
+      : _defaultBufferSize;
 
   void startWatching() {
     if (_settingsSubscription != null) {

@@ -23,8 +23,9 @@ class WatchActivity {
   factory WatchActivity.from(Iterable<History> histories) {
     final latest = <(int, int), WatchedEpisode>{};
     for (final history in histories) {
-      for (final MapEntry(key: episode, value: progress)
-          in history.progresses.entries) {
+      for (final progress in history.progresses.values) {
+        // The episode number, not the list position the record is keyed by.
+        final episode = progress.episodeNumber;
         final watchedAt = DateTime.fromMillisecondsSinceEpoch(
             progress.effectiveUpdatedAtMs(history.lastWatchTime));
         final key = (history.bangumiItem.id, episode);

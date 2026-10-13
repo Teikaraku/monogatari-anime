@@ -29,6 +29,9 @@ jobs:
       - run: flutter pub get
       - run: flutter analyze --no-fatal-infos --fatal-warnings
       - run: flutter test
+      - name: Verify real torrent streaming and cleanup
+        timeout-minutes: 3
+        run: dart --packages=.dart_tool/package_config.json tool/torrent_engine_smoke.dart
 
   android:
     name: Android release (production signed)

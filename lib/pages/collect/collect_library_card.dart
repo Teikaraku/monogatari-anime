@@ -9,7 +9,9 @@ class _CollectPosterCard extends StatelessWidget {
     required this.onOpen,
     required this.onChangeType,
     this.progress,
-    this.onResume,
+    this.onPlay,
+    this.playLabel = '开始观看',
+    this.onPickEpisode,
   });
 
   final CollectedBangumi entry;
@@ -18,7 +20,9 @@ class _CollectPosterCard extends StatelessWidget {
   final CollectProgress? progress;
   final VoidCallback onOpen;
   final ValueChanged<CollectType>? onChangeType;
-  final VoidCallback? onResume;
+  final VoidCallback? onPlay;
+  final String playLabel;
+  final VoidCallback? onPickEpisode;
 
   /// One short progress phrase for the narrow poster footer.
   String? get _shortProgress {
@@ -139,7 +143,9 @@ class _CollectPosterCard extends StatelessWidget {
       final menu = _CollectEntryMenu(
         entry: entry,
         onChanged: onChangeType,
-        onResume: onResume,
+        onPlay: onPlay,
+        playLabel: playLabel,
+        onPickEpisode: onPickEpisode,
       );
       final footer = compact
           ? Padding(
@@ -256,18 +262,26 @@ class _CollectListTile extends StatelessWidget {
     super.key,
     required this.entry,
     required this.showRating,
+    required this.showStatus,
     required this.onOpen,
     required this.onChangeType,
     this.progress,
-    this.onResume,
+    this.onPlay,
+    this.playLabel = '开始观看',
+    this.onPickEpisode,
   });
 
   final CollectedBangumi entry;
   final bool showRating;
+
+  /// Shows the 追番 status, for the 全部 category.
+  final bool showStatus;
   final CollectProgress? progress;
   final VoidCallback onOpen;
   final ValueChanged<CollectType>? onChangeType;
-  final VoidCallback? onResume;
+  final VoidCallback? onPlay;
+  final String playLabel;
+  final VoidCallback? onPickEpisode;
 
   @override
   Widget build(BuildContext context) {
@@ -280,6 +294,7 @@ class _CollectListTile extends StatelessWidget {
     final schedule = progress?.scheduleLabel;
     final hasUpdate = progress?.hasUpdate ?? false;
     final metadata = [
+      if (showStatus) CollectType.fromValue(entry.type).label,
       if (schedule != null)
         schedule
       else if (airDate != null)
@@ -294,7 +309,7 @@ class _CollectListTile extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: Stack(
         children: [
-          // Isolate menu focus and taps from card navigation.
+          // Isolate the buttons from card navigation.
           Positioned.fill(
             child: Semantics(
               button: true,
@@ -308,51 +323,70 @@ class _CollectListTile extends StatelessWidget {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(10, 10, 14, 10),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                ExcludeSemantics(
-                  child: IgnorePointer(
-                    child: SizedBox(
-                      width: 80,
-                      height: 120,
-                      child: _CollectCover(
-                        item: item,
-                        borderRadius: BorderRadius.circular(8),
+            padding: const EdgeInsets.fromLTRB(10, 10, 6, 10),
+            child: IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  ExcludeSemantics(
+                    child: IgnorePointer(
+                      child: Align(
+                        alignment: Alignment.topCenter,
+                        child: SizedBox(
+                          width: 88,
+                          height: 128,
+                          child: _CollectCover(
+                            item: item,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      ExcludeSemantics(
-                        child: IgnorePointer(
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(minHeight: 76),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: ExcludeSemantics(
+                                child: IgnorePointer(
+                                  child: Padding(
+                                    padding: const EdgeInsets.only(top: 6),
+                                    child: Text(
+                                      title,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: theme.textTheme.titleMedium
+                                          ?.copyWith(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w600,
+                                        height: 1.35,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            _CollectEntryMenu(
+                              entry: entry,
+                              onChanged: onChangeType,
+                            ),
+                          ],
+                        ),
+                        ExcludeSemantics(
+                          child: IgnorePointer(
                             child: Padding(
-                              padding: const EdgeInsets.only(top: 4, bottom: 8),
+                              padding: const EdgeInsets.only(right: 8),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text(
-                                    title,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style:
-                                        theme.textTheme.titleMedium?.copyWith(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w600,
-                                      height: 1.35,
-                                    ),
-                                  ),
                                   if (progressLabel.isNotEmpty || hasUpdate)
                                     Padding(
-                                      padding: const EdgeInsets.only(top: 6),
+                                      padding: const EdgeInsets.only(top: 2),
                                       child: Row(
                                         children: [
                                           if (hasUpdate) ...[
@@ -382,8 +416,8 @@ class _CollectListTile extends StatelessWidget {
                                         metadata.join(' · '),
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
-                                        style:
-                                            theme.textTheme.bodySmall?.copyWith(
+                                        style: theme.textTheme.bodySmall
+                                            ?.copyWith(
                                           fontSize: 12,
                                           color: colors.onSurfaceVariant,
                                         ),
@@ -394,41 +428,61 @@ class _CollectListTile extends StatelessWidget {
                             ),
                           ),
                         ),
-                      ),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 6,
-                        children: [
-                          _CollectEntryMenu(
-                            entry: entry,
-                            onChanged: onChangeType,
-                            showStatusLabel: true,
-                          ),
-                          if (onResume != null)
-                            TextButton.icon(
-                              onPressed: onResume,
-                              style: TextButton.styleFrom(
-                                backgroundColor: colors.primary,
-                                foregroundColor: colors.onPrimary,
-                                shape: const StadiumBorder(),
-                                visualDensity: VisualDensity.standard,
-                                tapTargetSize: MaterialTapTargetSize.padded,
-                                minimumSize: const Size(0, 32),
-                                padding: const EdgeInsetsDirectional.fromSTEB(
-                                    10, 0, 14, 0),
-                                textStyle: const TextStyle(
-                                    fontSize: 14, fontWeight: FontWeight.w600),
-                              ),
-                              icon: const Icon(Icons.play_arrow_rounded,
-                                  size: 18),
-                              label: const Text('继续看'),
+                        const Spacer(),
+                        const SizedBox(height: 10),
+                        Padding(
+                          padding: const EdgeInsets.only(right: 4),
+                          child: Align(
+                            alignment: AlignmentDirectional.centerEnd,
+                            child: Wrap(
+                              alignment: WrapAlignment.end,
+                              spacing: 4,
+                              runSpacing: 6,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              children: [
+                                if (onPickEpisode != null)
+                                  TextButton(
+                                    onPressed: onPickEpisode,
+                                    style: TextButton.styleFrom(
+                                      foregroundColor: colors.primary,
+                                      minimumSize: const Size(56, 36),
+                                      textStyle: const TextStyle(
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w500),
+                                    ),
+                                    child: const Text('选集'),
+                                  ),
+                                if (onPlay != null)
+                                  TextButton.icon(
+                                    onPressed: onPlay,
+                                    style: TextButton.styleFrom(
+                                      backgroundColor: colors.primary,
+                                      foregroundColor: colors.onPrimary,
+                                      shape: const StadiumBorder(),
+                                      visualDensity: VisualDensity.standard,
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.padded,
+                                      minimumSize: const Size(0, 36),
+                                      padding:
+                                          const EdgeInsetsDirectional.fromSTEB(
+                                              12, 0, 16, 0),
+                                      textStyle: const TextStyle(
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w600),
+                                    ),
+                                    icon: const Icon(Icons.play_arrow_rounded,
+                                        size: 20),
+                                    label: Text(playLabel),
+                                  ),
+                              ],
                             ),
-                        ],
-                      ),
-                    ],
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ],
@@ -495,15 +549,17 @@ class _CollectEntryMenu extends StatelessWidget {
   const _CollectEntryMenu({
     required this.entry,
     required this.onChanged,
-    this.onResume,
-    this.showStatusLabel = false,
+    this.onPlay,
+    this.playLabel = '开始观看',
+    this.onPickEpisode,
   });
   final CollectedBangumi entry;
   final ValueChanged<CollectType>? onChanged;
 
-  /// Offered first in the poster menu; the list tile has its own button.
-  final VoidCallback? onResume;
-  final bool showStatusLabel;
+  /// Offered first in the poster menu; the list tile has its own buttons.
+  final VoidCallback? onPlay;
+  final String playLabel;
+  final VoidCallback? onPickEpisode;
 
   @override
   Widget build(BuildContext context) {
@@ -511,12 +567,13 @@ class _CollectEntryMenu extends StatelessWidget {
     final type = CollectType.fromValue(entry.type);
     final title = CollectLibraryQuery.titleOf(entry);
     return KazumiMenuButton(
-      enabled: onChanged != null || onResume != null,
+      enabled: onChanged != null || onPlay != null || onPickEpisode != null,
       menuChildren: [
-        if (onResume != null) ...[
-          KazumiMenuItem(onPressed: onResume, label: '继续看'),
+        if (onPlay != null) KazumiMenuItem(onPressed: onPlay, label: playLabel),
+        if (onPickEpisode != null)
+          KazumiMenuItem(onPressed: onPickEpisode, label: '选集'),
+        if (onPlay != null || onPickEpisode != null)
           const Divider(indent: 16, endIndent: 16),
-        ],
         for (final status
             in CollectType.values.where((type) => type.isCollected))
           KazumiMenuItem(
@@ -535,37 +592,16 @@ class _CollectEntryMenu extends StatelessWidget {
         ),
       ],
       builder: (context, toggle) {
-        return showStatusLabel
-            ? Tooltip(
-                message: '调整《$title》的观看状态',
-                child: TextButton.icon(
-                  style: TextButton.styleFrom(
-                    backgroundColor: colors.primary.withValues(alpha: 0.1),
-                    foregroundColor: colors.primary,
-                    shape: const StadiumBorder(),
-                    visualDensity: VisualDensity.standard,
-                    tapTargetSize: MaterialTapTargetSize.padded,
-                    minimumSize: const Size(0, 32),
-                    padding: const EdgeInsetsDirectional.fromSTEB(14, 0, 10, 0),
-                    textStyle: const TextStyle(
-                        fontSize: 14, fontWeight: FontWeight.w500),
-                  ),
-                  onPressed: toggle,
-                  iconAlignment: IconAlignment.end,
-                  icon: const Icon(Icons.unfold_more_rounded, size: 16),
-                  label: Text(type.label),
-                ),
-              )
-            : IconButton(
-                tooltip: '管理《$title》 · ${type.label}',
-                onPressed: toggle,
-                style: IconButton.styleFrom(
-                  foregroundColor: colors.primary,
-                  minimumSize: const Size(40, 40),
-                  visualDensity: VisualDensity.standard,
-                ),
-                icon: const Icon(Icons.more_horiz_rounded, size: 20),
-              );
+        return IconButton(
+          tooltip: '管理《$title》 · ${type.label}',
+          onPressed: toggle,
+          style: IconButton.styleFrom(
+            foregroundColor: colors.primary,
+            minimumSize: const Size(40, 40),
+            visualDensity: VisualDensity.standard,
+          ),
+          icon: const Icon(Icons.more_horiz_rounded, size: 20),
+        );
       },
     );
   }

@@ -895,6 +895,10 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
                   ),
                   KazumiMenuItem(
                     onPressed: () {
+                      if (playerController.isTorrentStream) {
+                        KazumiDialog.showToast(message: 'RSS 视频正在本机下载，请使用内置播放器');
+                        return;
+                      }
                       final needRestart = playerController.playback.playing;
                       playerController.pause();
                       RemotePlay()
@@ -911,7 +915,13 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
                     label: '远程投屏',
                   ),
                   KazumiMenuItem(
-                    onPressed: playerController.launchExternalPlayer,
+                    onPressed: () {
+                      if (playerController.isTorrentStream) {
+                        KazumiDialog.showToast(message: 'RSS 视频正在本机下载，请使用内置播放器');
+                        return;
+                      }
+                      playerController.launchExternalPlayer();
+                    },
                     label: '外部播放',
                   ),
                   SubmenuButton(

@@ -4,6 +4,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_modular/flutter_modular.dart';
 import 'package:kazumi/bean/dialog/dialog.dart';
 import 'package:kazumi/bean/widget/kazumi_menu.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
@@ -106,6 +107,13 @@ class _InfoActionsMenuState extends State<InfoActionsMenu> {
   Widget build(BuildContext context) {
     return KazumiMenuButton(
       menuChildren: [
+        KazumiMenuItem(
+          onPressed: () => context.pushNamed(
+            '/subscriptions/',
+            arguments: widget.bangumiItem,
+          ),
+          label: 'RSS 资源与订阅',
+        ),
         KazumiMenuItem(
           onPressed: _savingCover ? null : _saveCover,
           label: _savingCover ? '保存中…' : '保存封面',

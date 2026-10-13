@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:kazumi/bean/dialog/dialog_helper.dart';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter_volume_controller/flutter_volume_controller.dart';
@@ -87,6 +88,7 @@ class PlayerController implements Disposable {
   String? coverUrl;
   String videoUrl = '';
   bool isLocalPlayback = false;
+  bool isTorrentStream = false;
   Timer? hideVolumeUITimer;
   Timer? _volumeGestureSyncTimer;
   double? _pendingGestureVolume;
@@ -173,6 +175,7 @@ class PlayerController implements Disposable {
 
     videoUrl = params.videoUrl;
     isLocalPlayback = params.isLocalPlayback;
+    isTorrentStream = params.isTorrentStream;
     bangumiId = params.bangumiId;
     currentEpisode = params.episode;
     currentDanmakuEpisodeNumber = params.danmakuEpisodeNumber;
@@ -209,6 +212,7 @@ class PlayerController implements Disposable {
         canInstall: () => initialization.isActive,
         offset: params.offset,
         videoSourceFormat: params.videoSourceFormat,
+        isTorrentStream: params.isTorrentStream,
       );
     } catch (e) {
       if (initialization.isStale) {
@@ -455,6 +459,10 @@ class PlayerController implements Disposable {
   }
 
   Future<void> launchExternalPlayer() async {
+    if (isTorrentStream) {
+      KazumiDialog.showToast(message: 'RSS 视频正在本机下载，请使用内置播放器');
+      return;
+    }
     await externalPlayback.launch();
   }
 

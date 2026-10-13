@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:canvas_danmaku/models/danmaku_content_item.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_modular/flutter_modular.dart';
 import 'package:flutter_mobx/flutter_mobx.dart';
 import 'package:mobx/mobx.dart' as mobx;
 import 'package:screen_brightness_platform_interface/screen_brightness_platform_interface.dart';
@@ -29,6 +30,7 @@ import 'package:kazumi/pages/video/video_side_panel.dart';
 import 'package:kazumi/pages/video/video_system_bars.dart';
 import 'package:kazumi/services/player/pip_utils.dart';
 import 'package:kazumi/services/api_video/api_video_models.dart';
+import 'package:kazumi/services/download/background_download_service.dart';
 import 'package:kazumi/services/player/timed_shutdown_service.dart';
 import 'package:kazumi/services/storage/storage.dart';
 import 'package:kazumi/utils/device.dart';
@@ -189,22 +191,42 @@ class _VideoPageState extends State<VideoPage>
       apiPlaybackLibraryName,
     );
     final progress = history?.progresses[history.lastWatchEpisode];
-    final episode = await videoPageController.restoreOnlineEpisode(
-      pageUrl: args.initialEpisodePageUrl ?? history?.episodePageUrl,
-      legacyEpisode: args.initialEpisode ?? progress?.episode,
-      startupSession: startupSession,
-    );
+    final picked = args.startEpisodeNumber;
+    final rssEpisode = videoPageController.requestedRssEpisodeIndex;
+    if (videoPageController.isRssPlayback &&
+        (args.rssReleaseId != null || args.torrentTaskId != null) &&
+        rssEpisode == null) {
+      videoPageController.rejectRssRelease();
+      return;
+    }
+    final episode =
+        rssEpisode ??
+        (picked != null
+            ? await videoPageController.onlineEpisodeByNumber(
+                picked,
+                startupSession: startupSession,
+              )
+            : await videoPageController.restoreOnlineEpisode(
+                pageUrl: args.initialEpisodePageUrl ?? history?.episodePageUrl,
+                legacyEpisode: args.initialEpisode ?? progress?.episode,
+                startupSession: startupSession,
+              ));
     if (episode == null || !mounted || _isExiting || startupSession.isStale) {
       return;
     }
     videoPageController.resetEpisodeState(episode: episode);
-    videoPageController.historyOffset = playResume
-        ? (args.initialOffset ?? progress?.progress.inSeconds ?? 0)
+    final resumeHistory = playResume && picked == null;
+    // Explicit RSS releases resume their own identity in changeEpisode, never
+    // the offset of a different episode that happened to be watched last.
+    videoPageController.historyOffset = resumeHistory
+        ? (args.initialOffset ??
+              (rssEpisode == null ? progress?.progress.inSeconds ?? 0 : 0))
         : 0;
     _revealCurrentEpisode();
     await changeEpisode(
       videoPageController.selectedEpisode.episode,
       offset: videoPageController.historyOffset,
+      resumeHistory: resumeHistory,
     );
   }
 
@@ -254,9 +276,14 @@ class _VideoPageState extends State<VideoPage>
     int episode, {
     int currentRoad = 0,
     int offset = 0,
+    bool resumeHistory = true,
   }) async {
     if (!mounted || _isExiting) {
       return;
+    }
+    if (videoPageController.isRssPlayback) {
+      await _resumeTorrentForegroundService();
+      if (!mounted || _isExiting) return;
     }
     setState(() {
       webviewLogLines.clear();
@@ -266,6 +293,7 @@ class _VideoPageState extends State<VideoPage>
       episode,
       currentRoad: currentRoad,
       offset: offset,
+      resumeHistory: resumeHistory,
       playerController: playerController,
     );
   }
@@ -399,7 +427,12 @@ class _VideoPageState extends State<VideoPage>
                             ),
                             const SizedBox(height: 10),
                             Text(
-                              videoPageController.loading
+                              videoPageController.isRssPlayback &&
+                                      videoPageController
+                                          .playbackStatus
+                                          .isNotEmpty
+                                  ? videoPageController.playbackStatus
+                                  : videoPageController.loading
                                   ? '正在自动获取播放资源'
                                   : '正在加载视频',
                               style: const TextStyle(color: Colors.white),
@@ -459,11 +492,13 @@ class _VideoPageState extends State<VideoPage>
                               Icons.refresh_outlined,
                               color: Colors.white,
                             ),
-                            onPressed: () {
-                              unawaited(
-                                videoPageController.retryPlayback(
-                                  playerController,
-                                ),
+                            onPressed: () async {
+                              if (videoPageController.isRssPlayback) {
+                                await _resumeTorrentForegroundService();
+                              }
+                              if (!mounted || _isExiting) return;
+                              await videoPageController.retryPlayback(
+                                playerController,
                               );
                             },
                           ),
@@ -559,13 +594,17 @@ class _VideoPageState extends State<VideoPage>
           _closeSidePanel();
           changeEpisode(episode, currentRoad: road);
         },
-        onDownload: (road) => showAdaptiveBottomSheet<void>(
-          context: context,
-          builder: (context) => DownloadEpisodeSheet(
-            road: road,
-            videoPageController: videoPageController,
-          ),
-        ),
+        onDownload: (road) => videoPageController.isRssPlayback
+            ? videoPageController.isDirectTorrentPlayback
+                  ? _openTorrentTasks()
+                  : _openSubscriptions()
+            : showAdaptiveBottomSheet<void>(
+                context: context,
+                builder: (context) => DownloadEpisodeSheet(
+                  road: road,
+                  videoPageController: videoPageController,
+                ),
+              ),
       );
     },
   );
@@ -579,6 +618,7 @@ class _VideoPageState extends State<VideoPage>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (!videoPageController.isOfflineMode) _sourceControls(),
           PlayerContentTabs(
             controller: tabController,
             onEpisodesSelected: _revealCurrentEpisode,
@@ -588,11 +628,14 @@ class _VideoPageState extends State<VideoPage>
               controller: tabController,
               children: [
                 episodePanel,
-                EpisodeCommentsSheet(
-                  episode: episodeNum,
-                  selection: videoPageController.selectedEpisode,
-                  videoPageController: videoPageController,
-                ),
+                if (episodeNum <= 0)
+                  const Center(child: Text('此资源尚未匹配到对应的单集评论'))
+                else
+                  EpisodeCommentsSheet(
+                    episode: episodeNum,
+                    selection: videoPageController.selectedEpisode,
+                    videoPageController: videoPageController,
+                  ),
               ],
             ),
           ),
@@ -600,4 +643,109 @@ class _VideoPageState extends State<VideoPage>
       ),
     );
   }
+
+  Future<void> _openSubscriptions() async {
+    final wasPlaying = playerController.playback.playing;
+    await _pauseForSourceNavigation();
+    if (!mounted || _isExiting) return;
+    await context.pushNamed(
+      '/subscriptions/',
+      arguments: videoPageController.bangumiItem,
+    );
+    if (!mounted || _isExiting) return;
+    if (videoPageController.isRssPlayback &&
+        !videoPageController.isDirectTorrentPlayback) {
+      await _switchSource('rss', rememberSelection: false);
+    } else if (wasPlaying) {
+      await _resumeAfterSourceNavigation();
+    }
+  }
+
+  Future<void> _openTorrentTasks() async {
+    final wasPlaying = playerController.playback.playing;
+    await _pauseForSourceNavigation();
+    if (!mounted || _isExiting) return;
+    await context.pushNamed(
+      '/torrent-tasks/',
+      arguments: videoPageController.bangumiItem.id,
+    );
+    if (mounted && !_isExiting && wasPlaying) {
+      await _resumeAfterSourceNavigation();
+    }
+  }
+
+  Future<void> _pauseForSourceNavigation() async {
+    if (videoPageController.loading || playerController.playback.loading) {
+      // Source navigation is available before player controls are mounted.
+      await playerController.playback.mediaPlayer?.pause();
+      playerController.playback.playing = false;
+    } else {
+      await playerController.pause();
+    }
+  }
+
+  Future<void> _resumeAfterSourceNavigation() async {
+    if (videoPageController.loading || playerController.playback.loading) {
+      await playerController.playback.mediaPlayer?.play();
+      playerController.playback.playing = true;
+    } else {
+      await playerController.play();
+    }
+  }
+
+  Future<void> _switchSource(
+    String source, {
+    bool rememberSelection = true,
+  }) async {
+    if (_isExiting) return;
+    if (source == 'rss') {
+      await _resumeTorrentForegroundService();
+      if (!mounted || _isExiting) return;
+    }
+    await videoPageController.switchPlaybackSource(
+      source,
+      playerController,
+      rememberSelection: rememberSelection,
+    );
+    _revealCurrentEpisode();
+  }
+
+  Future<void> _resumeTorrentForegroundService() async {
+    // The same episode callback handles automatic next-episode playback.
+    // A background transition must not undo an Android service time limit.
+    if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+      await BackgroundDownloadService().resumeForUser();
+    }
+  }
+
+  Widget _sourceControls() => Observer(
+    builder: (context) => Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 8, 0),
+      child: Row(
+        children: [
+          Expanded(
+            child: SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'api', label: Text('在线播放')),
+                ButtonSegment(value: 'rss', label: Text('RSS 播放')),
+              ],
+              selected: {videoPageController.playbackSource},
+              showSelectedIcon: false,
+              onSelectionChanged: (value) => _switchSource(value.single),
+            ),
+          ),
+          IconButton(
+            tooltip: '字幕组订阅',
+            onPressed: _openSubscriptions,
+            icon: const Icon(Icons.rss_feed),
+          ),
+          IconButton(
+            tooltip: '磁力任务',
+            onPressed: _openTorrentTasks,
+            icon: const Icon(Icons.downloading_outlined),
+          ),
+        ],
+      ),
+    ),
+  );
 }

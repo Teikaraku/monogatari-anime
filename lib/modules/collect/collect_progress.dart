@@ -14,7 +14,7 @@ class CollectProgress {
   final AiringSummary? airing;
   final BroadcastSlot? slot;
 
-  int? get watchedEpisode => history?.lastWatchEpisode;
+  int? get watchedEpisode => history?.watchedEpisodeNumber;
 
   num? get latestAired => airing?.latest?.displayNumber;
 

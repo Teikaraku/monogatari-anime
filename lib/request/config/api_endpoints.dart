@@ -35,6 +35,10 @@ class ApiEndpoints {
   static const String bangumiAirtime =
       '$bangumiMirrorDomain/meta/airtime.json';
 
+  /// 物语应用更新（GitHub release 格式）
+  static const String latestAppMirror =
+      '$bangumiMirrorDomain/app-update/latest.json';
+
   /// 弹弹官网
   static const String dandanIndex = 'https://www.dandanplay.com/';
 

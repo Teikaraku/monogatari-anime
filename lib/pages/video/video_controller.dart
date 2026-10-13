@@ -6,6 +6,11 @@ import 'package:kazumi/pages/video/video_playback_args.dart';
 import 'package:kazumi/services/api_video/api_video_service.dart';
 import 'package:kazumi/services/player/automatic_playback_runner.dart';
 import 'package:kazumi/services/player/media_startup_gate.dart';
+import 'package:kazumi/services/player/playback_source_preferences.dart';
+import 'package:kazumi/services/rss/rss_playback_resolver.dart';
+import 'package:kazumi/services/rss/rss_models.dart';
+import 'package:kazumi/services/torrent/torrent_models.dart';
+import 'package:kazumi/services/torrent/torrent_playback_catalog.dart';
 import 'package:kazumi/pages/history/history_controller.dart';
 import 'package:kazumi/pages/player/player_controller.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
@@ -28,7 +33,25 @@ import 'package:kazumi/pages/video/video_fullscreen_controller.dart';
 
 part 'video_controller.g.dart';
 
-class VideoPageController = _VideoPageController with _$VideoPageController;
+class VideoPageController extends _VideoPageController
+    with _$VideoPageController {
+  VideoPageController(
+    super.historyController,
+    super.downloadRepository,
+    super.downloadManager,
+    super.apiVideoService, {
+    super.rssPlayback,
+    super.playbackPreferences,
+  });
+  VideoPageController.withRss(
+    super.history,
+    super.downloads,
+    super.downloadManager,
+    super.api,
+    RssPlaybackResolver rss,
+    PlaybackSourcePreferences preferences,
+  ) : super(rssPlayback: rss, playbackPreferences: preferences);
+}
 
 class VideoEpisodeSelection {
   const VideoEpisodeSelection({required this.episode, required this.road});
@@ -57,8 +80,10 @@ abstract class _VideoPageController with Store implements Disposable {
     this.historyController,
     this.downloadRepository,
     this.downloadManager,
-    this.apiVideoService,
-  );
+    this.apiVideoService, {
+    this.rssPlayback,
+    PlaybackSourcePreferences? playbackPreferences,
+  }) : playbackPreferences = playbackPreferences ?? PlaybackSourcePreferences();
 
   late BangumiItem bangumiItem;
   EpisodeInfo episodeInfo = EpisodeInfo.fromTemplate();
@@ -139,6 +164,53 @@ abstract class _VideoPageController with Store implements Disposable {
 
   List<ApiVideoEpisode> apiEpisodes = const [];
 
+  final RssPlaybackResolver? rssPlayback;
+  final PlaybackSourcePreferences playbackPreferences;
+  RssPlaybackCatalog? _rssCatalog;
+  TorrentPlaybackLease? _torrentLease;
+  String? _requestedRssRelease;
+  double? _requestedRssEpisode;
+  String? _directTorrentTaskId;
+  int? _requestedTorrentFile;
+  final Map<String, int> _torrentFiles = {};
+  bool _rssRecovering = false;
+
+  @observable
+  String playbackSource = 'api';
+
+  @observable
+  String playbackStatus = '';
+
+  bool get isRssPlayback => !isOfflineMode && playbackSource == 'rss';
+  bool get isDirectTorrentPlayback =>
+      isRssPlayback && _directTorrentTaskId != null;
+
+  int? get requestedRssEpisodeIndex {
+    if (_directTorrentTaskId != null) {
+      final index = apiEpisodes.indexWhere(
+        (episode) => _torrentFiles[episode.key] == _requestedTorrentFile,
+      );
+      return index < 0 ? null : index + 1;
+    }
+    if (!isRssPlayback || _rssCatalog == null || _requestedRssRelease == null) {
+      return null;
+    }
+    final releases = _rssCatalog!.releases.where(
+      (r) => r.key == _requestedRssRelease,
+    );
+    if (releases.isEmpty) return null;
+    final release = releases.first;
+    final key = release.isSpecial
+        ? 'rss-special:${release.specialKey ?? release.key}'
+        : (_requestedRssEpisode ?? release.episodeNumber) == null
+        ? null
+        : rssEpisodeKey((_requestedRssEpisode ?? release.episodeNumber)!);
+    final index = apiEpisodes.indexWhere((episode) => episode.key == key);
+    return index < 0 ? null : index + 1;
+  }
+
+  void rejectRssRelease() => _failLoading('所选资源不在当前字幕组中，或需要先选择合集集数');
+
   String _offlinePluginName = '';
 
   final HistoryController historyController;
@@ -155,6 +227,7 @@ abstract class _VideoPageController with Store implements Disposable {
   final List<StreamSubscription<dynamic>> _mediaSubscriptions = [];
   Timer? _startupTimer;
   Timer? _bufferingTimer;
+  StreamSubscription<List<TorrentTaskSnapshot>>? _torrentProgress;
 
   final StreamController<String> _logStreamController =
       StreamController<String>.broadcast();
@@ -173,6 +246,22 @@ abstract class _VideoPageController with Store implements Disposable {
             ? bangumiItem.nameCn
             : bangumiItem.name;
         src = 'monogatari://subject/${bangumiItem.id}';
+        final savedSource = playbackPreferences.forSubject(bangumiItem.id);
+        playbackSource =
+            ((args.rememberPlaybackSource
+                        ? args.playbackSource ?? savedSource
+                        : savedSource ?? args.playbackSource) ??
+                    GStorage.getSetting(SettingsKeys.playbackSource)) ==
+                'rss'
+            ? 'rss'
+            : 'api';
+        if (args.rememberPlaybackSource && args.playbackSource != null) {
+          _rememberPlaybackSource(playbackSource);
+        }
+        _requestedRssRelease = args.rssReleaseId;
+        _requestedRssEpisode = args.rssEpisodeNumber;
+        _directTorrentTaskId = isRssPlayback ? args.torrentTaskId : null;
+        _requestedTorrentFile = isRssPlayback ? args.torrentFileIndex : null;
         roadList.clear();
       case OfflineVideoPlaybackArgs():
         _initForOfflinePlayback(
@@ -194,6 +283,76 @@ abstract class _VideoPageController with Store implements Disposable {
     await previousUpdates?.cancel();
     if (cancellation.isCancelled) return false;
     try {
+      if (isRssPlayback) {
+        final resolver = rssPlayback;
+        if (resolver == null) throw const RssException('RSS 播放服务尚未初始化');
+        if (_directTorrentTaskId != null) {
+          await resolver.torrents.initialize();
+          if (cancellation.isCancelled) return false;
+          final task = resolver.torrents.tasks
+              .where((task) => task.id == _directTorrentTaskId)
+              .firstOrNull;
+          if (task == null || task.bangumiId != bangumiItem.id) {
+            throw const RssException('磁力任务不存在或不属于当前番剧');
+          }
+          final entries = torrentPlaybackCatalog(task);
+          _torrentFiles.clear();
+          _torrentFiles.addEntries(
+            entries.map(
+              (entry) => MapEntry(entry.episode.key, entry.fileIndex),
+            ),
+          );
+          _applyOnlineCatalog(
+            entries.map((entry) => entry.episode).toList(),
+            '磁力任务',
+          );
+          if (requestedRssEpisodeIndex == null) {
+            throw const RssException('所选视频文件不存在，请返回任务列表重新选择');
+          }
+          _catalogExpansionDone = Future.value();
+          playbackStatus = '正在读取磁力任务';
+          return true;
+        }
+        playbackStatus = '正在刷新字幕组订阅';
+        final catalog = await resolver.load(
+          bangumiItem.id,
+          cancelToken: cancellation,
+        );
+        if (cancellation.isCancelled) return false;
+        _rssCatalog = catalog;
+        _applyOnlineCatalog(
+          catalog.episodes,
+          'RSS · ${catalog.subscription.group.name}',
+        );
+        _catalogExpansionDone =
+            catalog.refreshed?.then((updated) {
+              if (updated == null ||
+                  cancellation.isCancelled ||
+                  !isRssPlayback) {
+                return;
+              }
+              final releases = {
+                for (final release in catalog.releases) release.key: release,
+                for (final release in updated.releases) release.key: release,
+              };
+              _rssCatalog = RssPlaybackCatalog(
+                updated.subscription,
+                releases.values.toList(),
+              );
+              final known = apiEpisodes.map((episode) => episode.key).toSet();
+              _applyOnlineCatalog([
+                ...apiEpisodes,
+                ...updated.episodes.where((episode) => known.add(episode.key)),
+              ], 'RSS · ${updated.subscription.group.name}');
+            }) ??
+            Future.value();
+        if (_requestedRssRelease != null && requestedRssEpisodeIndex == null) {
+          await _catalogExpansionDone;
+          if (cancellation.isCancelled) return false;
+        }
+        playbackStatus = 'RSS · ${catalog.subscription.group.name}';
+        return true;
+      }
       final catalog = await apiVideoService.loadCatalog(
         bangumiItem,
         cancelToken: cancellation,
@@ -247,12 +406,131 @@ abstract class _VideoPageController with Store implements Disposable {
       return true;
     } catch (error) {
       if (!cancellation.isCancelled) {
+        if (isRssPlayback &&
+            _directTorrentTaskId == null &&
+            _requestedRssRelease == null &&
+            GStorage.getSetting(SettingsKeys.rssFallbackToApi)) {
+          playbackSource = 'api';
+          playbackStatus = 'RSS 暂不可用，已切换为在线播放';
+          _log(playbackStatus);
+          return initializeOnline();
+        }
         _failLoading(
-          error is ApiVideoUnavailableException ? error.message : '获取剧集失败，请重试',
+          error is ApiVideoUnavailableException
+              ? error.message
+              : error is RssException
+              ? error.message
+              : '获取剧集失败，请重试',
         );
       }
       return false;
     }
+  }
+
+  void _applyOnlineCatalog(List<ApiVideoEpisode> episodes, String name) {
+    runInAction(() {
+      apiEpisodes = episodes;
+      roadList = ObservableList.of([
+        Road(
+          name: name,
+          data: episodes
+              .map((e) => apiEpisodePageUrl(bangumiItem.id, e))
+              .toList(),
+          identifier: episodes.map((e) => e.title).toList(),
+        ),
+      ]);
+    });
+  }
+
+  Future<void> switchPlaybackSource(
+    String source,
+    PlayerController player, {
+    bool rememberSelection = true,
+  }) async {
+    if (isOfflineMode || (source != 'api' && source != 'rss')) return;
+    if (rememberSelection) _rememberPlaybackSource(source);
+    final old = selectedEpisode.episode;
+    final key = old > 0 && old <= apiEpisodes.length
+        ? apiEpisodes[old - 1].key
+        : null;
+    final offset = player.playback.currentPosition.inSeconds;
+    _playbackSessions.cancel();
+    _playbackCancellation?.cancel();
+    unawaited(_torrentProgress?.cancel());
+    _torrentProgress = null;
+    _cancelMediaWatch();
+    _catalogCancellation?.cancel();
+    final session = beginOnlineStartup();
+    final previous = _automaticPlayback;
+    _automaticPlayback = null;
+    final lease = _torrentLease;
+    _torrentLease = null;
+    await _cleanUpPlayback(() async => await previous?.cancel());
+    if (session.isStale) {
+      await _cleanUpPlayback(() async => await lease?.close());
+      return;
+    }
+    await _cleanUpPlayback(player.stop);
+    await _cleanUpPlayback(() async => await lease?.close());
+    if (session.isStale) return;
+    playbackSource = source;
+    _requestedRssRelease = null;
+    _requestedRssEpisode = null;
+    _directTorrentTaskId = null;
+    _requestedTorrentFile = null;
+    _torrentFiles.clear();
+    _rssCatalog = null;
+    _rssRecovering = false;
+    apiEpisodes = const [];
+    roadList.clear();
+    _beginEpisodeSwitch(selectedEpisode);
+    if (!await initializeOnline() || session.isStale) return;
+    var index = key == null ? 0 : apiEpisodes.indexWhere((e) => e.key == key);
+    if (index < 0 && isRssPlayback) {
+      await _catalogExpansionDone;
+      if (session.isStale) return;
+      index = apiEpisodes.indexWhere((e) => e.key == key);
+    }
+    if (index < 0 &&
+        isRssPlayback &&
+        GStorage.getSetting(SettingsKeys.rssFallbackToApi)) {
+      playbackSource = 'api';
+      playbackStatus = '订阅尚未发布这一话，已切换为在线播放';
+      if (!await initializeOnline() || session.isStale) return;
+      index = apiEpisodes.indexWhere((e) => e.key == key);
+    }
+    if (index < 0) {
+      await _catalogExpansionDone;
+      if (session.isStale) return;
+      index = apiEpisodes.indexWhere((e) => e.key == key);
+    }
+    if (index < 0) {
+      resetEpisodeState(episode: 0);
+      _failLoading('当前播放方式没有对应集数，请选择下方其他剧集');
+      return;
+    }
+    await changeEpisode(index + 1, offset: offset, playerController: player);
+  }
+
+  Future<void> _cleanUpPlayback(Future<void> Function() cleanup) async {
+    try {
+      await cleanup();
+    } catch (error) {
+      KazumiLogger().w('Playback cleanup failed', error: error);
+    }
+  }
+
+  void _rememberPlaybackSource(String source) {
+    unawaited(
+      playbackPreferences.remember(bangumiItem.id, source).catchError((
+        Object error,
+      ) {
+        KazumiLogger().w(
+          'Failed to save playback source preference',
+          error: error,
+        );
+      }),
+    );
   }
 
   Future<int?> restoreOnlineEpisode({
@@ -266,6 +544,21 @@ abstract class _VideoPageController with Store implements Disposable {
         (episode) => apiEpisodePageUrl(bangumiItem.id, episode) == pageUrl,
       );
       var index = find();
+      if (index < 0 && isRssPlayback) {
+        await _catalogExpansionDone;
+        if (startupSession?.isStale == true) return null;
+        index = find();
+      }
+      if (index < 0 &&
+          isRssPlayback &&
+          _requestedRssRelease == null &&
+          GStorage.getSetting(SettingsKeys.rssFallbackToApi)) {
+        playbackSource = 'api';
+        if (!await initializeOnline() || startupSession?.isStale == true) {
+          return null;
+        }
+        index = find();
+      }
       if (index < 0) {
         await _catalogExpansionDone;
         if (startupSession?.isStale == true) return null;
@@ -281,16 +574,58 @@ abstract class _VideoPageController with Store implements Disposable {
     return episode > 0 && episode <= apiEpisodes.length ? episode : 1;
   }
 
+  /// The list position of episode [number] (第 N 话), waiting for the full
+  /// catalog when it is not among the first episodes loaded.
+  Future<int?> onlineEpisodeByNumber(
+    int number, {
+    AsyncSession? startupSession,
+  }) async {
+    if (startupSession?.isStale == true) return null;
+    int find() => apiEpisodes.indexWhere((episode) => episode.number == number);
+    var index = find();
+    if (index < 0 && isRssPlayback) {
+      await _catalogExpansionDone;
+      if (startupSession?.isStale == true) return null;
+      index = find();
+    }
+    if (index < 0 &&
+        isRssPlayback &&
+        _requestedRssRelease == null &&
+        GStorage.getSetting(SettingsKeys.rssFallbackToApi)) {
+      playbackSource = 'api';
+      if (!await initializeOnline() || startupSession?.isStale == true) {
+        return null;
+      }
+      index = find();
+    }
+    if (index < 0) {
+      await _catalogExpansionDone;
+      if (startupSession?.isStale == true) return null;
+      index = find();
+    }
+    if (index < 0) {
+      _failLoading('第 $number 话暂时没有可用资源，请选择其他集数');
+      return null;
+    }
+    return index + 1;
+  }
+
   int? adjacentOnlineEpisode(int episode, {required bool forward}) {
     if (episode <= 0 || episode > apiEpisodes.length) return null;
-    final ordered = [...apiEpisodes]
-      ..sort((a, b) {
-        if (a.number != null && b.number != null)
-          return a.number!.compareTo(b.number!);
-        if (a.number != null) return -1;
-        if (b.number != null) return 1;
-        return a.key.compareTo(b.key);
-      });
+    if (isRssPlayback && apiEpisodes[episode - 1].number == null) return null;
+    final ordered =
+        [
+          ...apiEpisodes.where(
+            (entry) => !isRssPlayback || entry.number != null,
+          ),
+        ]..sort((a, b) {
+          if (a.number != null && b.number != null) {
+            return a.number!.compareTo(b.number!);
+          }
+          if (a.number != null) return -1;
+          if (b.number != null) return 1;
+          return a.key.compareTo(b.key);
+        });
     final index =
         ordered.indexOf(apiEpisodes[episode - 1]) + (forward ? 1 : -1);
     if (index < 0 || index >= ordered.length) return null;
@@ -300,7 +635,7 @@ abstract class _VideoPageController with Store implements Disposable {
   Future<void> retryPlayback(PlayerController playerController) async {
     apiVideoService.clearCache();
     await changeEpisode(
-      selectedEpisode.episode,
+      selectedEpisode.episode > 0 ? selectedEpisode.episode : 1,
       currentRoad: selectedEpisode.road,
       offset: playerController.playback.currentPosition.inSeconds,
       playerController: playerController,
@@ -426,8 +761,9 @@ abstract class _VideoPageController with Store implements Disposable {
       );
       if (history == null) return 0;
       for (final progress in history.progresses.values) {
-        if (progress.episodePageUrl == identity.episodePageUrl)
+        if (progress.episodePageUrl == identity.episodePageUrl) {
           return progress.progress.inSeconds;
+        }
       }
       return history.episodePageUrl == identity.episodePageUrl
           ? history.progresses[history.lastWatchEpisode]?.progress.inSeconds ??
@@ -587,6 +923,7 @@ abstract class _VideoPageController with Store implements Disposable {
     int episode, {
     int currentRoad = 0,
     int offset = 0,
+    bool resumeHistory = true,
     required PlayerController playerController,
   }) async {
     _onlineStartupSessions.cancel();
@@ -599,10 +936,16 @@ abstract class _VideoPageController with Store implements Disposable {
     _danmakuSessions.cancel();
     playerController.danmaku.finishDanmakuLoad();
     _playbackCancellation?.cancel();
+    unawaited(_torrentProgress?.cancel());
+    _torrentProgress = null;
     _cancelMediaWatch();
     final previousPlayback = _automaticPlayback;
     _automaticPlayback = null;
-    await previousPlayback?.cancel();
+    final previousLease = _torrentLease;
+    _torrentLease = null;
+    _rssRecovering = false;
+    await _cleanUpPlayback(() async => await previousPlayback?.cancel());
+    await _cleanUpPlayback(() async => await previousLease?.close());
     if (session.isStale) return;
     _activePlayerController = playerController;
     playerController.onPlaybackError = null;
@@ -643,12 +986,24 @@ abstract class _VideoPageController with Store implements Disposable {
 
     _applyResolvedSelection(resolvedEpisode);
     _setOnlineHistoryIdentity(resolvedEpisode);
+    final resolvedOffset = resumeHistory && offset <= 0
+        ? getHistoryOffsetFor(_playbackHistoryIdentity!)
+        : offset;
 
     KazumiLogger().i(
       'VideoPageController: changed to ${resolvedEpisode.displayTitle}',
     );
+    if (isRssPlayback) {
+      await _startRssPlayback(
+        resolvedOffset,
+        resolvedEpisode: resolvedEpisode,
+        session: session,
+        playerController: playerController,
+      );
+      return;
+    }
     await _startAutomaticPlayback(
-      offset,
+      resolvedOffset,
       resolvedEpisode: resolvedEpisode,
       session: session,
       playerController: playerController,
@@ -731,6 +1086,10 @@ abstract class _VideoPageController with Store implements Disposable {
     PlaybackInitParams params,
     AsyncSession session,
   ) async {
+    if (params.danmakuEpisodeNumber <= 0) {
+      playerController.danmaku.finishDanmakuLoad(disableDanmaku: true);
+      return;
+    }
     final danmakuSession = _danmakuSessions.begin();
     playerController.danmaku.beginDanmakuLoad();
     try {
@@ -856,10 +1215,142 @@ abstract class _VideoPageController with Store implements Disposable {
         apiEpisodes[resolvedEpisode.listIndex - 1],
         cancelToken: cancellation,
       ),
-      offset: offset > 0
-          ? offset
-          : getHistoryOffsetFor(_playbackHistoryIdentity!),
+      offset: offset,
     );
+  }
+
+  Future<void> _startRssPlayback(
+    int offset, {
+    required EpisodeRef resolvedEpisode,
+    required AsyncSession session,
+    required PlayerController playerController,
+  }) async {
+    final cancellation = CancelToken();
+    _playbackCancellation = cancellation;
+    try {
+      final catalog = _rssCatalog;
+      final resolver = rssPlayback;
+      if ((catalog == null && _directTorrentTaskId == null) ||
+          resolver == null) {
+        throw const RssException('请重新加载订阅');
+      }
+      final episode = apiEpisodes[resolvedEpisode.listIndex - 1];
+      final explicitId = requestedRssEpisodeIndex == resolvedEpisode.listIndex
+          ? _requestedRssRelease
+          : null;
+      final retainDownload = GStorage.getSetting(
+        SettingsKeys.rssDownloadWhilePlaying,
+      );
+      final lease = _directTorrentTaskId != null
+          ? await resolver.torrents.openStream(
+              _directTorrentTaskId!,
+              _torrentFiles[episode.key]!,
+              cancelToken: cancellation,
+              downloadWhilePlaying: retainDownload,
+            )
+          : await resolver.open(
+              catalog!,
+              episode,
+              releaseId: explicitId,
+              downloadWhilePlaying: retainDownload,
+              cancelToken: cancellation,
+              onStatus: (status) {
+                if (session.isActive) playbackStatus = status;
+              },
+            );
+      if (session.isStale) {
+        await lease.close();
+        return;
+      }
+      _torrentLease = lease;
+      _torrentProgress = resolver.torrents.watchTasks.listen((tasks) {
+        if (session.isStale || !_loading || _automaticPlayback != null) return;
+        for (final task in tasks) {
+          if (task.id != lease.taskId) continue;
+          final speed = (task.downloadBytesPerSecond / 1024).round();
+          playbackStatus = task.state == TorrentTaskState.paused
+              ? '下载已暂停，可在磁力任务中继续'
+              : '正在缓冲 · ${task.peers} 个连接 · $speed KB/s';
+        }
+      });
+      final params = PlaybackInitParams(
+        videoUrl: lease.url.toString(),
+        offset: offset,
+        isLocalPlayback: false,
+        isTorrentStream: true,
+        bangumiId: bangumiItem.id,
+        pluginName: apiPlaybackLibraryName,
+        episode: resolvedEpisode.listIndex,
+        danmakuEpisodeNumber: resolvedEpisode.danmakuEpisodeNumber,
+        pageUrl: resolvedEpisode.pageUrl,
+        sortNumber: resolvedEpisode.sortNumber,
+        httpHeaders: const {},
+        adBlockerEnabled: false,
+        episodeTitle: resolvedEpisode.displayTitle,
+        referer: '',
+        currentRoad: 0,
+        coverUrl: bangumiItem.images['large'],
+        bangumiName: title,
+      );
+      final playable = await _openAndWatchMedia(
+        playerController,
+        params,
+        session,
+      );
+      if (session.isStale) return;
+      if (!playable) throw const RssException('连接做种者或视频缓冲超时，可稍后重试或使用在线播放');
+      playingEpisode = selectedEpisode;
+      playbackStatus = catalog == null
+          ? '正在播放磁力文件'
+          : 'RSS · ${catalog.subscription.group.name}';
+      _finishLoading();
+      if (episode.number != null &&
+          episode.number! == episode.number!.truncateToDouble()) {
+        unawaited(_loadPlaybackDanmaku(playerController, params, session));
+      }
+    } catch (error) {
+      if (session.isStale || cancellation.isCancelled) return;
+      await _handleRssFailure(
+        error.toString(),
+        offset,
+        resolvedEpisode,
+        session,
+        playerController,
+      );
+    }
+  }
+
+  Future<void> _handleRssFailure(
+    String message,
+    int offset,
+    EpisodeRef episode,
+    AsyncSession session,
+    PlayerController player,
+  ) async {
+    if (_rssRecovering || session.isStale) return;
+    _rssRecovering = true;
+    unawaited(_torrentProgress?.cancel());
+    _torrentProgress = null;
+    _cancelMediaWatch();
+    player.onPlaybackError = null;
+    final lease = _torrentLease;
+    _torrentLease = null;
+    await _cleanUpPlayback(player.stop);
+    await _cleanUpPlayback(() async => await lease?.close());
+    if (session.isStale) return;
+    final number = apiEpisodes[episode.listIndex - 1].number;
+    if (number != null && GStorage.getSetting(SettingsKeys.rssFallbackToApi)) {
+      playbackStatus = 'RSS 暂不可用，正在尝试在线播放';
+      _log(playbackStatus);
+      await _startAutomaticPlayback(
+        offset,
+        resolvedEpisode: episode,
+        session: session,
+        playerController: player,
+      );
+    } else {
+      _failLoading(message);
+    }
   }
 
   Future<bool> _openAndWatchMedia(
@@ -874,8 +1365,10 @@ abstract class _VideoPageController with Store implements Disposable {
     }
 
     controller.onPlaybackError = (error) {
-      if (session.isStale || !AutomaticPlaybackRunner.isFatalMediaError(error))
+      if (session.isStale ||
+          !AutomaticPlaybackRunner.isFatalMediaError(error)) {
         return false;
+      }
       _log('当前资源播放失败，自动尝试下一个');
       if (!ready.isCompleted) {
         complete(false);
@@ -884,15 +1377,20 @@ abstract class _VideoPageController with Store implements Disposable {
       }
       return true;
     };
-    final startupTimer = Timer(const Duration(seconds: 18), () {
-      _log('当前资源加载超时，自动尝试下一个');
-      complete(false);
-    });
+    final startupTimer = Timer(
+      Duration(seconds: params.isTorrentStream ? 90 : 18),
+      () {
+        _log('当前资源加载超时，自动尝试下一个');
+        complete(false);
+      },
+    );
     _startupTimer = startupTimer;
     try {
-      final initialized = await controller
-          .init(params)
-          .timeout(const Duration(seconds: 18), onTimeout: () => false);
+      final initialized = await waitForMediaInitialization(
+        initialization: controller.init(params),
+        interrupted: ready.future,
+        isCurrent: () => session.isActive,
+      );
       if (!initialized || session.isStale) complete(false);
       final player = controller.playback.mediaPlayer;
       if (player == null || ready.isCompleted) return await ready.future;
@@ -915,12 +1413,15 @@ abstract class _VideoPageController with Store implements Disposable {
             ready.isCompleted &&
             buffering &&
             player.state.playing) {
-          _bufferingTimer = Timer(const Duration(seconds: 25), () {
-            if (current() && player.state.buffering && player.state.playing) {
-              _log('当前资源长时间缓冲，自动尝试下一个');
-              _recoverPlayback(session);
-            }
-          });
+          _bufferingTimer = Timer(
+            Duration(seconds: params.isTorrentStream ? 90 : 25),
+            () {
+              if (current() && player.state.buffering && player.state.playing) {
+                _log('当前资源长时间缓冲，自动尝试下一个');
+                _recoverPlayback(session);
+              }
+            },
+          );
         }
       }
 
@@ -957,6 +1458,22 @@ abstract class _VideoPageController with Store implements Disposable {
     // immediately after the first decoded frame cannot lose its recovery.
     Timer.run(() {
       if (session.isStale) return;
+      if (_automaticPlayback == null && isRssPlayback) {
+        final episode = _resolveOnlineEpisode(selectedEpisode.episode);
+        final player = _activePlayerController;
+        if (episode != null && player != null) {
+          unawaited(
+            _handleRssFailure(
+              'RSS 视频连接中断，请重试',
+              player.playback.currentPosition.inSeconds,
+              episode,
+              session,
+              player,
+            ),
+          );
+        }
+        return;
+      }
       unawaited(_automaticPlayback?.recover());
     });
   }
@@ -1061,6 +1578,10 @@ abstract class _VideoPageController with Store implements Disposable {
     _cancelMediaWatch();
     _activePlayerController?.onPlaybackError = null;
     unawaited(_automaticPlayback?.cancel());
+    unawaited(_torrentProgress?.cancel());
+    final lease = _torrentLease;
+    _torrentLease = null;
+    unawaited(_cleanUpPlayback(() async => await lease?.close()));
     if (!_logStreamController.isClosed) {
       _logStreamController.close();
     }
