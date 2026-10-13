@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
@@ -16,10 +17,20 @@ import 'package:logger/logger.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  const intentChannel = MethodChannel('com.predidit.kazumi/intent');
   late Directory directory;
   late PathProviderPlatform originalPaths;
 
   setUpAll(() async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(intentChannel, (call) async {
+          if (call.method == 'isRunningOnX11') return false;
+          throw PlatformException(
+            code: 'unexpected_method',
+            message: call.method,
+          );
+        });
     Logger.level = Level.off;
     directory = await Directory.systemTemp.createTemp(
       'monogatari_startup_test_',
@@ -35,6 +46,8 @@ void main() {
   });
 
   tearDownAll(() async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(intentChannel, null);
     await Hive.close();
     PathProviderPlatform.instance = originalPaths;
     expect(
