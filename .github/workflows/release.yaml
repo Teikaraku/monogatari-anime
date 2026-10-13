@@ -209,8 +209,12 @@ jobs:
               exit 0
             fi
           else
-            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "物语 $VERSION" --notes-file docs/release-notes.md
-            RELEASE_ID=$(gh api "repos/$GH_REPO/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+            # Use the create response: the list endpoint may not yet expose a
+            # newly created draft, even though creation succeeded.
+            RELEASE_ID=$(gh api --method POST "repos/$GH_REPO/releases" \
+              -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
+              -f name="物语 $VERSION" -F draft=true \
+              -F body=@docs/release-notes.md --jq '.id')
           fi
           test -n "$RELEASE_ID"
           gh release upload "$TAG" dist/*.apk dist/*.aab dist/*.zip dist/*.ipa dist/SHA256SUMS.txt --clobber
