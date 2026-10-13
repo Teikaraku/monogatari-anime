@@ -92,3 +92,10 @@ dependencies {}
 
 // GitHub split APKs and the app bundle share Flutter's monotonically increasing
 // versionCode so moving between supported distribution formats is an upgrade.
+// Flutter adds an ABI offset by default; this app selects the correct ABI from
+// release metadata rather than relying on a store's versionCode selection.
+android.applicationVariants.all { variant ->
+    variant.outputs.each { output ->
+        output.versionCodeOverride = variant.versionCode
+    }
+}
