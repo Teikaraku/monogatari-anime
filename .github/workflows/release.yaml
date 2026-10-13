@@ -195,19 +195,23 @@ jobs:
           if TAG_SHA=$(gh api "repos/$GH_REPO/commits/$TAG" --jq '.sha' 2>/dev/null); then
             test "$TAG_SHA" = "$GITHUB_SHA" || { echo 'This tag belongs to another commit; increment pubspec.yaml.'; exit 1; }
           fi
-          if gh release view "$TAG" --json isDraft --jq '.isDraft' > "$RUNNER_TEMP/release-draft" 2>/dev/null; then
-            RELEASE_TARGET=$(gh api "repos/$GH_REPO/releases/tags/$TAG" --jq '.target_commitish')
+          # A draft has no public tag yet: resolve its database ID from the list.
+          RELEASE_ID=$(gh api "repos/$GH_REPO/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+          if [ -n "$RELEASE_ID" ]; then
+            RELEASE_TARGET=$(gh api "repos/$GH_REPO/releases/$RELEASE_ID" --jq '.target_commitish')
             TARGET_SHA=$(gh api "repos/$GH_REPO/commits/$RELEASE_TARGET" --jq '.sha')
             test "$TARGET_SHA" = "$GITHUB_SHA" || { echo 'This release belongs to another commit; increment pubspec.yaml.'; exit 1; }
-            if [ "$(cat "$RUNNER_TEMP/release-draft")" = false ]; then
+            if [ "$(gh api "repos/$GH_REPO/releases/$RELEASE_ID" --jq '.draft')" = false ]; then
               echo 'This exact release was already published.'
               exit 0
             fi
           else
             gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "物语 $VERSION" --notes-file docs/release-notes.md
+            RELEASE_ID=$(gh api "repos/$GH_REPO/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id")
           fi
+          test -n "$RELEASE_ID"
           gh release upload "$TAG" dist/*.apk dist/*.aab dist/*.zip dist/*.ipa dist/SHA256SUMS.txt --clobber
-          gh api "repos/$GH_REPO/releases/tags/$TAG" > "$RUNNER_TEMP/release-metadata.json"
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID" > "$RUNNER_TEMP/release-metadata.json"
           python3 tool/verify_release_assets.py dist "$RUNNER_TEMP/release-metadata.json"
           MAKE_LATEST=true
           if LATEST_TAG=$(gh api "repos/$GH_REPO/releases/latest" --jq '.tag_name' 2>/dev/null); then
