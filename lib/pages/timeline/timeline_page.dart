@@ -13,13 +13,17 @@ import 'package:kazumi/bean/widget/loading_indicator.dart';
 import 'package:kazumi/bean/widget/mono_chip.dart';
 import 'package:kazumi/bean/widget/state_presentation.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
+import 'package:kazumi/modules/bangumi/broadcast_slot.dart';
 import 'package:kazumi/pages/timeline/timeline_controller.dart';
 import 'package:kazumi/services/storage/storage.dart';
 import 'package:kazumi/utils/anime_season.dart';
 import 'package:kazumi/utils/theme.dart';
 
 part 'timeline_options.dart';
+part 'timeline_rail.dart';
 part 'timeline_week_selector.dart';
+
+const _weekdayNames = ['一', '二', '三', '四', '五', '六', '日'];
 
 class TimelinePage extends StatefulWidget {
   const TimelinePage({
@@ -254,6 +258,7 @@ class _TimelinePageState extends State<TimelinePage> {
                                         columns: columns,
                                         inset: inset,
                                         compact: narrowPortrait,
+                                        currentSeason: currentSeason,
                                       ),
                                   ],
                                 ),
@@ -366,16 +371,14 @@ class _TimelinePageState extends State<TimelinePage> {
     required int columns,
     required double inset,
     required bool compact,
+    required bool currentSeason,
   }) {
-    final cardHeight = BangumiTimelineCard.heightFor(
-        MediaQuery.textScalerOf(context),
-        compact: compact);
     final rawCalendar = _controller.bangumiCalendar;
     final filteredOut = day < rawCalendar.length && rawCalendar[day].isNotEmpty;
-    return _TimelineScrollView(
-      key: PageStorageKey('timeline-day-$day'),
-      slivers: [
-        if (items.isEmpty)
+    if (items.isEmpty) {
+      return _TimelineScrollView(
+        key: PageStorageKey('timeline-day-$day'),
+        slivers: [
           SliverFillRemaining(
             hasScrollBody: false,
             child: Padding(
@@ -394,33 +397,187 @@ class _TimelinePageState extends State<TimelinePage> {
                 ],
               ),
             ),
-          )
-        else
+          ),
+        ],
+      );
+    }
+
+    final airtimes = _controller.airtimes;
+    final weekday = day + 1;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final isToday = currentSeason && now.weekday == weekday;
+    final scaler = MediaQuery.textScalerOf(context);
+
+    String? dayPrefixOf(BroadcastSlot slot) => slot.localWeekday == weekday
+        ? null
+        : '周${_weekdayNames[slot.localWeekday - 1]}';
+
+    String? premiereOf(BroadcastSlot slot) {
+      if (!currentSeason) return null;
+      final start = slot.localStart;
+      return DateTime(start.year, start.month, start.day).isAfter(today)
+          ? '${start.month}月${start.day}日开播'
+          : null;
+    }
+
+    Widget card(BangumiItem item, TimelineAirtime? airtime) =>
+        BangumiTimelineCard(
+          key: ValueKey(item.id),
+          bangumiItem: item,
+          compact: compact,
+          showRating: _showRating,
+          isWatching: watchingIds.contains(item.id),
+          airtime: airtime,
+          onTap: () => context.pushNamed('/info/', arguments: item),
+        );
+
+    SliverGrid grid(List<BangumiItem> shown, int columns,
+        TimelineAirtime? Function(BangumiItem item) airtimeOf) {
+      final cardHeight = BangumiTimelineCard.heightFor(scaler,
+          compact: compact,
+          withAirtime: shown.any((item) => airtimeOf(item) != null));
+      return SliverGrid(
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: columns,
+          mainAxisSpacing: 12,
+          crossAxisSpacing: 12,
+          mainAxisExtent: cardHeight,
+        ),
+        delegate: SliverChildBuilderDelegate(
+          (context, index) => card(shown[index], airtimeOf(shown[index])),
+          childCount: shown.length,
+        ),
+      );
+    }
+
+    // Other sort orders keep the plain grid, with the time on each card.
+    if (_controller.sort != TimelineSort.airTime) {
+      TimelineAirtime? airtimeOf(BangumiItem item) {
+        final slot = airtimes[item.id];
+        if (slot == null) return null;
+        final prefix = dayPrefixOf(slot);
+        return TimelineAirtime(
+          time: prefix == null
+              ? slot.localTimeLabel
+              : '$prefix ${slot.localTimeLabel}',
+          premiere: premiereOf(slot),
+        );
+      }
+
+      return _TimelineScrollView(
+        key: PageStorageKey('timeline-day-$day'),
+        slivers: [
           SliverPadding(
             padding: EdgeInsets.fromLTRB(inset, 0, inset, 24),
-            sliver: SliverGrid(
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: columns,
-                mainAxisSpacing: 12,
-                crossAxisSpacing: 12,
-                mainAxisExtent: cardHeight,
-              ),
-              delegate: SliverChildBuilderDelegate(
-                (context, index) {
-                  final item = items[index];
-                  return BangumiTimelineCard(
-                    key: ValueKey(item.id),
-                    bangumiItem: item,
-                    compact: compact,
-                    showRating: _showRating,
-                    isWatching: watchingIds.contains(item.id),
-                    onTap: () => context.pushNamed('/info/', arguments: item),
+            sliver: grid(items, columns, airtimeOf),
+          ),
+        ],
+      );
+    }
+
+    // Timeline: items arrive sorted by broadcast time, untimed ones last.
+    final groups = <_TimelineGroup>[];
+    final untimed = <BangumiItem>[];
+    for (final item in items) {
+      final slot = airtimes[item.id];
+      if (slot == null) {
+        untimed.add(item);
+        continue;
+      }
+      final prefix = dayPrefixOf(slot);
+      final last = groups.isEmpty ? null : groups.last;
+      if (last != null &&
+          last.time == slot.localTimeLabel &&
+          last.dayPrefix == prefix) {
+        last.items.add(item);
+      } else {
+        groups.add(
+            _TimelineGroup(time: slot.localTimeLabel, dayPrefix: prefix)
+              ..items.add(item));
+      }
+    }
+
+    // Today, past times are "已更新" and the first one ahead "即将更新".
+    final states = List.filled(groups.length, _NodeState.normal);
+    if (isToday) {
+      var nextFound = false;
+      for (var i = 0; i < groups.length; i++) {
+        final group = groups[i];
+        if (group.dayPrefix != null) continue;
+        final parts = group.time.split(':');
+        final at = today.add(Duration(
+            hours: int.parse(parts[0]), minutes: int.parse(parts[1])));
+        if (!at.isAfter(now)) {
+          states[i] = _NodeState.aired;
+        } else if (!nextFound) {
+          states[i] = _NodeState.next;
+          nextFound = true;
+        }
+      }
+    }
+
+    TimelineAirtime? premiereLine(BangumiItem item) {
+      final slot = airtimes[item.id];
+      final premiere = slot == null ? null : premiereOf(slot);
+      return premiere == null
+          ? null
+          : TimelineAirtime(time: '', premiere: premiere);
+    }
+
+    final minCardWidth = scaler.scale(16) > 24 ? 440.0 : 340.0;
+    return _TimelineScrollView(
+      key: PageStorageKey('timeline-day-$day'),
+      slivers: [
+        if (groups.isNotEmpty)
+          SliverPadding(
+            padding:
+                EdgeInsets.fromLTRB(inset, 0, inset, untimed.isEmpty ? 24 : 0),
+            sliver: SliverLayoutBuilder(builder: (context, constraints) {
+              final width =
+                  constraints.crossAxisExtent - _TimelineNode.railWidth;
+              final nodeColumns =
+                  ((width + 12) / (minCardWidth + 12)).floor().clamp(1, 3);
+              return SliverList.builder(
+                itemCount: groups.length,
+                itemBuilder: (context, index) {
+                  final group = groups[index];
+                  return _TimelineNode(
+                    group: group,
+                    state: states[index],
+                    isFirst: index == 0,
+                    isLast: index == groups.length - 1,
+                    columns: nodeColumns,
+                    cardHeight: BangumiTimelineCard.heightFor(scaler,
+                        compact: compact,
+                        withAirtime: group.items
+                            .any((item) => premiereLine(item) != null)),
+                    cardBuilder: (item) => card(item, premiereLine(item)),
                   );
                 },
-                childCount: items.length,
+              );
+            }),
+          ),
+        if (untimed.isNotEmpty) ...[
+          if (groups.isNotEmpty)
+            SliverPadding(
+              padding: EdgeInsets.fromLTRB(inset, 28, inset, 12),
+              sliver: SliverToBoxAdapter(
+                child: Text(
+                  '时间未定',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: MonoPalette.of(context).secondaryLabel,
+                  ),
+                ),
               ),
             ),
+          SliverPadding(
+            padding: EdgeInsets.fromLTRB(inset, 0, inset, 24),
+            sliver: grid(untimed, columns, (_) => null),
           ),
+        ],
       ],
     );
   }

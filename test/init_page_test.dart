@@ -1,5 +1,3 @@
-import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -10,7 +8,6 @@ import 'package:kazumi/pages/collect/collect_controller.dart';
 import 'package:kazumi/pages/download/download_controller.dart';
 import 'package:kazumi/pages/init_page.dart';
 import 'package:kazumi/pages/my/my_controller.dart';
-import 'package:kazumi/plugins/plugins_controller.dart';
 import 'package:kazumi/services/network/bangumi_acceleration.dart';
 import 'package:kazumi/services/shaders/shader_asset_service.dart';
 import 'package:kazumi/services/storage/storage.dart';
@@ -33,7 +30,8 @@ void main() {
     await GStorage.init();
     await GStorage.putSetting(SettingsKeys.defaultStartupPage, '/ready');
     await GStorage.putSetting(SettingsKeys.shortcutDialogShown, true);
-    await GStorage.putSetting(SettingsKeys.checkPluginUpdateOnStartup, false);
+    // Even an old rule-update preference must no longer trigger rule loading.
+    await GStorage.putSetting(SettingsKeys.checkPluginUpdateOnStartup, true);
   });
 
   tearDownAll(() async {
@@ -50,38 +48,12 @@ void main() {
     await directory.delete(recursive: true);
   });
 
-  testWidgets('launch automatically prepares bundled rules only when missing', (
+  testWidgets('launch opens the default page without initializing rules', (
     tester,
   ) async {
-    final saved = Completer<void>();
-    final writes = <String>[];
-    final plugins = PluginsController(
-      pluginJsonWriter: (json) async {
-        if ((jsonDecode(json) as List).isNotEmpty) {
-          writes.add(json);
-          await saved.future;
-        }
-        await File(
-          '${directory.path}/plugins/v2/plugins.json',
-        ).writeAsString(json);
-      },
-    );
     final myController = _TestMyController();
-
     await tester.runAsync(() async {
-      await _pumpStartup(tester, plugins, myController);
-      await _pumpUntil(tester, () => writes.isNotEmpty);
-    });
-    expect(writes, hasLength(1));
-    final rules = jsonDecode(writes.single) as List;
-    expect(rules.map((rule) => rule['name']), containsAll(['DM84', '7sefun']));
-    expect(find.byType(InitPage), findsOneWidget);
-    expect(find.text('Ready to watch'), findsNothing);
-    expect(find.text('继续'), findsNothing);
-    expect(find.text('开始使用'), findsNothing);
-
-    saved.complete();
-    await tester.runAsync(() async {
+      await _pumpStartup(tester, myController);
       await _pumpUntil(
         tester,
         () => find.text('Ready to watch').evaluate().isNotEmpty,
@@ -90,26 +62,26 @@ void main() {
     });
     await tester.pump(const Duration(milliseconds: 600));
     expect(find.byType(InitPage), findsNothing);
-    expect(plugins.pluginList, hasLength(2));
-    expect(writes, hasLength(1));
+    expect(find.text('继续'), findsNothing);
+    expect(find.text('开始使用'), findsNothing);
+    final rulesDirectoryExists = await tester.runAsync(
+      () => Directory('${directory.path}/plugins').exists(),
+    );
+    expect(rulesDirectoryExists, isFalse);
     expect(GStorage.getSetting(SettingsKeys.autoUpdate), isTrue);
     expect(myController.updateChecks, 1);
     expect(BangumiAcceleration.current, BangumiAcceleration.mirror);
     expect(GStorage.getSetting(SettingsKeys.imageAcceleration), 'mirror');
-    expect(GStorage.getSetting(SettingsKeys.enableGitProxy), isTrue);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpAndSettle();
-    final nextWrites = <String>[];
-    final nextPlugins = PluginsController(
-      pluginJsonWriter: (json) async {
-        nextWrites.add(json);
-      },
-    );
+    final legacyRules = File('${directory.path}/plugins/v2/plugins.json');
     final nextMyController = _TestMyController();
 
     await tester.runAsync(() async {
       await GStorage.putSetting(SettingsKeys.autoUpdate, false);
-      await _pumpStartup(tester, nextPlugins, nextMyController);
+      await legacyRules.parent.create(recursive: true);
+      await legacyRules.writeAsString('legacy rules remain untouched');
+      await _pumpStartup(tester, nextMyController);
       await _pumpUntil(
         tester,
         () => find.text('Ready to watch').evaluate().isNotEmpty,
@@ -117,8 +89,8 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 600));
     });
     await tester.pump(const Duration(milliseconds: 600));
-    expect(nextPlugins.pluginList, hasLength(2));
-    expect(nextWrites, isEmpty);
+    final legacyRulesContent = await tester.runAsync(legacyRules.readAsString);
+    expect(legacyRulesContent, 'legacy rules remain untouched');
     expect(nextMyController.updateChecks, 0);
     expect(GStorage.getSetting(SettingsKeys.autoUpdate), isFalse);
     await tester.pumpWidget(const SizedBox.shrink());
@@ -128,7 +100,6 @@ void main() {
 
 Future<void> _pumpStartup(
   WidgetTester tester,
-  PluginsController plugins,
   MyController myController,
 ) async {
   final module = createModule(
@@ -137,7 +108,6 @@ Future<void> _pumpStartup(
         ..route(
           '/',
           child: (context, state) => InitPage(
-            pluginsController: plugins,
             collectController: _TestCollectController(),
             shaderAssetService: _TestShaderService(),
             myController: myController,

@@ -64,6 +64,32 @@ class BangumiClient {
     }
   }
 
+  Future<dynamic> patch(
+    String url, {
+    Object? data,
+    bool requiresAuth = false,
+    CancelToken? cancelToken,
+  }) async {
+    try {
+      final response = await DioFactory.bangumiDio.patch(
+        url,
+        data: data,
+        options: Options(
+          headers: _headers(
+            requiresAuth: requiresAuth,
+            url: url,
+            method: 'PATCH',
+            data: data,
+          ),
+        ),
+        cancelToken: cancelToken,
+      );
+      return response.data;
+    } on DioException catch (e) {
+      throw await NetworkErrorMapper.mapException(e);
+    }
+  }
+
   Map<String, dynamic> _headers({
     required bool requiresAuth,
     String? accessToken,

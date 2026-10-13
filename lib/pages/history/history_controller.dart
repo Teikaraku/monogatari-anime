@@ -46,6 +46,9 @@ abstract class _HistoryController with Store {
     );
   }
 
+  History? historyForSubject(BangumiItem subject, String adapterName) =>
+      _historyRepository.getHistory(adapterName, subject);
+
   Progress? findProgress(
     BangumiItem bangumiItem,
     String adapterName,

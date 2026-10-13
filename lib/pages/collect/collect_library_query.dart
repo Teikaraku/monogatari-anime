@@ -2,6 +2,7 @@ import 'package:kazumi/modules/collect/collect_module.dart';
 import 'package:kazumi/modules/collect/collect_type.dart';
 
 enum CollectSort {
+  recentlyWatched('最近观看'),
   recentlyChanged('最近变更'),
   title('番剧名称'),
   rating('评分最高'),
@@ -9,6 +10,11 @@ enum CollectSort {
 
   const CollectSort(this.label);
   final String label;
+
+  static CollectSort fromName(String name) => values.firstWhere(
+        (sort) => sort.name == name,
+        orElse: () => recentlyWatched,
+      );
 }
 
 class CollectLibraryQuery {
@@ -33,12 +39,21 @@ class CollectLibraryQuery {
       ? _matches.length
       : _matches.where((entry) => entry.type == type.value).length;
 
-  List<CollectedBangumi> results(CollectType? type, CollectSort sort) {
+  /// [lastWatched] maps subject ids to their latest playback; under
+  /// [CollectSort.recentlyWatched], shows never played follow by change time.
+  List<CollectedBangumi> results(
+    CollectType? type,
+    CollectSort sort, {
+    Map<int, DateTime> lastWatched = const {},
+  }) {
     final result = _matches
         .where((entry) => type == null || entry.type == type.value)
         .toList();
+    DateTime watchedAt(CollectedBangumi entry) =>
+        lastWatched[entry.bangumiItem.id] ?? DateTime(0);
     result.sort((a, b) {
       final comparison = switch (sort) {
+        CollectSort.recentlyWatched => watchedAt(b).compareTo(watchedAt(a)),
         CollectSort.recentlyChanged => b.time.compareTo(a.time),
         CollectSort.title => titleOf(a).toLowerCase().compareTo(
               titleOf(b).toLowerCase(),

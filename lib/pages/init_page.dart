@@ -8,13 +8,11 @@ import 'package:kazumi/services/sync/bangumi_sync_service.dart';
 import 'package:kazumi/services/sync/danmaku_shield_sync_service.dart';
 import 'package:kazumi/services/sync/webdav.dart';
 import 'package:kazumi/services/storage/storage.dart';
-import 'package:kazumi/plugins/plugins_controller.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:kazumi/pages/collect/collect_controller.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/services/shaders/shader_asset_service.dart';
 import 'package:kazumi/pages/download/download_controller.dart';
-import 'package:kazumi/pages/plugin_editor/plugin_update_actions.dart';
 import 'package:kazumi/services/download/background_download_service.dart';
 import 'package:kazumi/services/platform/windows_shortcut.dart';
 import 'package:kazumi/services/platform/platform_environment_service.dart';
@@ -24,7 +22,6 @@ import 'package:kazumi/navigation.dart';
 class InitPage extends StatefulWidget {
   const InitPage({
     super.key,
-    required this.pluginsController,
     required this.collectController,
     required this.shaderAssetService,
     required this.myController,
@@ -32,7 +29,6 @@ class InitPage extends StatefulWidget {
     required this.danmakuShieldSync,
   });
 
-  final PluginsController pluginsController;
   final CollectController collectController;
   final ShaderAssetService shaderAssetService;
   final MyController myController;
@@ -44,7 +40,6 @@ class InitPage extends StatefulWidget {
 }
 
 class _InitPageState extends State<InitPage> {
-  PluginsController get pluginsController => widget.pluginsController;
   CollectController get collectController => widget.collectController;
   ShaderAssetService get shaderAssetService => widget.shaderAssetService;
   MyController get myController => widget.myController;
@@ -72,7 +67,6 @@ class _InitPageState extends State<InitPage> {
 
     await _checkRunningOnX11();
     await _showShortcutDialog();
-    await _pluginInit();
 
     if (!mounted) {
       return;
@@ -286,48 +280,6 @@ class _InitPageState extends State<InitPage> {
     if (create ?? false) {
       final success = await WindowsShortcut.createDesktopShortcut();
       KazumiDialog.showToast(message: success ? '桌面快捷方式已创建' : '桌面快捷方式创建失败');
-    }
-  }
-
-  Future<void> _pluginInit() async {
-    try {
-      await pluginsController.init();
-      if (pluginsController.pluginList.isEmpty) {
-        await pluginsController.copyPluginsToExternalDirectory();
-      }
-      unawaited(_pluginUpdate());
-    } catch (error, stackTrace) {
-      KazumiLogger().e(
-        'Plugin: failed to initialize rules',
-        error: error,
-        stackTrace: stackTrace,
-      );
-    }
-  }
-
-  Future<void> _pluginUpdate() async {
-    final checkOnStartup = GStorage.getSetting(
-      SettingsKeys.checkPluginUpdateOnStartup,
-    );
-    late final int count;
-    try {
-      count = await pluginsController.checkPluginUpdatesOnStartup(
-        enabled: checkOnStartup,
-      );
-    } catch (_) {
-      return;
-    }
-    if (count != 0) {
-      KazumiDialog.showToast(
-        message: '检测到 $count 条规则可以更新',
-        showActionButton: true,
-        actionLabel: '全部更新',
-        onActionPressed: () => updateAllPluginsWithFeedback(
-          pluginsController,
-          ensureCatalog: false,
-        ),
-        duration: const Duration(seconds: 5),
-      );
     }
   }
 

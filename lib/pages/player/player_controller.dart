@@ -39,6 +39,7 @@ class PlayerController implements Disposable {
 
   final ShaderAssetService shaderAssetService;
   final AudioController audioController;
+  bool Function(String error)? onPlaybackError;
   final AsyncSessionOwner _initializations = AsyncSessionOwner();
   Future<void>? _shutdownFuture;
   final PlayerPanelController panel = PlayerPanelController();
@@ -51,6 +52,7 @@ class PlayerController implements Disposable {
     debug: debug,
     videoUrl: () => videoUrl,
     isLocalPlayback: () => isLocalPlayback,
+    onPlaybackError: (error) => onPlaybackError?.call(error) ?? false,
   );
   late final PlayerSyncPlayController syncplay = PlayerSyncPlayController(
     bangumiId: () => bangumiId,
@@ -73,9 +75,9 @@ class PlayerController implements Disposable {
   );
   late final ExternalPlaybackLauncher externalPlayback =
       ExternalPlaybackLauncher(
-    videoUrl: () => videoUrl,
-    referer: () => referer,
-  );
+        videoUrl: () => videoUrl,
+        referer: () => referer,
+      );
 
   late int bangumiId;
   late int currentEpisode;
@@ -178,7 +180,8 @@ class PlayerController implements Disposable {
     referer = params.referer;
 
     KazumiLogger().i(
-        'PlayerController: ${params.isLocalPlayback ? "local" : "online"} playback, url: ${params.videoUrl}');
+      'PlayerController: ${params.isLocalPlayback ? "local" : "online"} playback, url: ${params.videoUrl}',
+    );
 
     playback.resetForInit();
     debug.playerLogLevel = GStorage.getSetting(SettingsKeys.playerLogLevel);
@@ -188,8 +191,9 @@ class PlayerController implements Disposable {
     );
 
     playback.buttonSkipTime = GStorage.getSetting(SettingsKeys.buttonSkipTime);
-    playback.arrowKeySkipTime =
-        GStorage.getSetting(SettingsKeys.arrowKeySkipTime);
+    playback.arrowKeySkipTime = GStorage.getSetting(
+      SettingsKeys.arrowKeySkipTime,
+    );
     try {
       await _releasePlaybackResources();
     } catch (_) {}
@@ -211,8 +215,10 @@ class PlayerController implements Disposable {
         return false;
       }
       playback.loading = false;
-      KazumiLogger()
-          .e('PlayerController: failed to initialize video', error: e);
+      KazumiLogger().e(
+        'PlayerController: failed to initialize video',
+        error: e,
+      );
       return false;
     }
     if (player == null || !_ownsInitialization(initialization, player)) {
@@ -245,23 +251,27 @@ class PlayerController implements Disposable {
         return false;
       }
 
-      FlutterVolumeController.addListener((volume) {
-        if (player == null || !_ownsInitialization(initialization, player)) {
-          return;
-        }
-        if (panel.volumeSeeking) {
-          return;
-        }
-        playback.applyExternalVolume(volume * 100);
-        if (!Platform.isAndroid && !panel.volumeSeeking) {
-          panel.showVolume = true;
-          hideVolumeUITimer?.cancel();
-          hideVolumeUITimer = Timer(const Duration(seconds: 1), () {
-            panel.showVolume = false;
-            hideVolumeUITimer = null;
-          });
-        }
-      }, category: AudioSessionCategory.playback, emitOnStart: false);
+      FlutterVolumeController.addListener(
+        (volume) {
+          if (player == null || !_ownsInitialization(initialization, player)) {
+            return;
+          }
+          if (panel.volumeSeeking) {
+            return;
+          }
+          playback.applyExternalVolume(volume * 100);
+          if (!Platform.isAndroid && !panel.volumeSeeking) {
+            panel.showVolume = true;
+            hideVolumeUITimer?.cancel();
+            hideVolumeUITimer = Timer(const Duration(seconds: 1), () {
+              panel.showVolume = false;
+              hideVolumeUITimer = null;
+            });
+          }
+        },
+        category: AudioSessionCategory.playback,
+        emitOnStart: false,
+      );
       if (!_ownsInitialization(initialization, player)) {
         return false;
       }
@@ -279,7 +289,9 @@ class PlayerController implements Disposable {
       if (syncplay.syncplayController!.currentFileName !=
           "$bangumiId[$currentEpisode]") {
         setSyncPlayPlayingBangumi(
-            forceSyncPlaying: true, forceSyncPosition: 0.0);
+          forceSyncPlaying: true,
+          forceSyncPosition: 0.0,
+        );
       }
     }
     return true;
@@ -290,10 +302,7 @@ class PlayerController implements Disposable {
   }
 
   Future<void> setShader(SuperResolutionMode mode, {Player? player}) async {
-    await playback.setShader(
-      mode,
-      player: player,
-    );
+    await playback.setShader(mode, player: player);
   }
 
   Future<void> setPlaybackSpeed(double playerSpeed) async {
@@ -402,10 +411,7 @@ class PlayerController implements Disposable {
   }
 
   Future<void> _shutdownResources() async {
-    await Future.wait([
-      _releasePlaybackResources(),
-      syncplay.dispose(),
-    ]);
+    await Future.wait([_releasePlaybackResources(), syncplay.dispose()]);
   }
 
   Future<void> _releasePlaybackResources() async {
@@ -453,27 +459,28 @@ class PlayerController implements Disposable {
   }
 
   Future<void> createSyncPlayRoom(
-      String room,
-      String username,
-      Future<void> Function(int episode, {int currentRoad, int offset})
-          changeEpisode) async {
-    await syncplay.createRoom(
-      room,
-      username,
-      changeEpisode,
-    );
+    String room,
+    String username,
+    Future<void> Function(int episode, {int currentRoad, int offset})
+    changeEpisode,
+  ) async {
+    await syncplay.createRoom(room, username, changeEpisode);
   }
 
-  void setSyncPlayCurrentPosition(
-      {bool? forceSyncPlaying, double? forceSyncPosition}) {
+  void setSyncPlayCurrentPosition({
+    bool? forceSyncPlaying,
+    double? forceSyncPosition,
+  }) {
     syncplay.setCurrentPosition(
       forceSyncPlaying: forceSyncPlaying,
       forceSyncPosition: forceSyncPosition,
     );
   }
 
-  Future<void> setSyncPlayPlayingBangumi(
-      {bool? forceSyncPlaying, double? forceSyncPosition}) async {
+  Future<void> setSyncPlayPlayingBangumi({
+    bool? forceSyncPlaying,
+    double? forceSyncPosition,
+  }) async {
     await syncplay.setPlayingBangumi(
       forceSyncPlaying: forceSyncPlaying,
       forceSyncPosition: forceSyncPosition,

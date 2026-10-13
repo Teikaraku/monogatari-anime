@@ -64,13 +64,6 @@ const List<_SettingsGroup> _settingsGroups = [
     title: '资源',
     categories: [
       _SettingsCategory(
-        label: '规则管理',
-        description: '番剧资源规则',
-        icon: Icons.extension_rounded,
-        path: '/settings/plugin',
-        color: Color(0xFFFF9500),
-      ),
-      _SettingsCategory(
         label: '下载设置',
         description: '并发数与弹幕缓存',
         icon: Icons.downloading_rounded,
@@ -117,7 +110,7 @@ const List<_SettingsGroup> _settingsGroups = [
     categories: [
       _SettingsCategory(
         label: '更新设置',
-        description: '应用与规则更新',
+        description: '应用更新检查',
         icon: Icons.update_rounded,
         path: '/settings/update',
         color: Color(0xFFFF9500),

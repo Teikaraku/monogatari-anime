@@ -23,7 +23,6 @@ class _NetworkMirrorSettingsState extends State<NetworkMirrorSettings> {
   @override
   Widget build(BuildContext context) {
     final bangumiAcceleration = BangumiAcceleration.current;
-    final gitProxy = GStorage.getSetting(SettingsKeys.enableGitProxy);
     final imageAcceleration = ImageAcceleration.fromSetting(
       GStorage.getSetting(SettingsKeys.imageAcceleration),
     );
@@ -52,14 +51,6 @@ class _NetworkMirrorSettingsState extends State<NetworkMirrorSettings> {
             description: (mode) => mode.description,
             setting: SettingsKeys.bangumiAcceleration,
           ),
-        ),
-        SettingsTile.switchTile(
-          leading: Icons.extension_rounded,
-          title: const Text('规则仓库镜像'),
-          description: const Text('加速规则的下载与更新'),
-          initialValue: gitProxy,
-          onToggle: (value) =>
-              _save(SettingsKeys.enableGitProxy, value ?? !gitProxy),
         ),
         SettingsTile(
           leading: Icons.image_rounded,

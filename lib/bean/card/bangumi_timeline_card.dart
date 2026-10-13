@@ -3,6 +3,19 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:kazumi/bean/card/network_img_layer.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
+import 'package:kazumi/utils/theme.dart';
+
+/// The broadcast line of a timetable card.
+class TimelineAirtime {
+  const TimelineAirtime({required this.time, this.premiere});
+
+  /// "20:30", or "周五 00:30" when it falls on another local day; empty in
+  /// the timeline, whose rail carries the time.
+  final String time;
+
+  /// "10月15日开播" for shows that have not started yet.
+  final String? premiere;
+}
 
 class BangumiTimelineCard extends StatelessWidget {
   const BangumiTimelineCard({
@@ -12,12 +25,14 @@ class BangumiTimelineCard extends StatelessWidget {
     required this.onTap,
     this.isWatching = false,
     this.compact = false,
+    this.airtime,
   });
 
   final BangumiItem bangumiItem;
   final bool showRating;
   final bool isWatching;
   final bool compact;
+  final TimelineAirtime? airtime;
   final VoidCallback onTap;
 
   static final _episodePattern =
@@ -33,16 +48,29 @@ class BangumiTimelineCard extends StatelessWidget {
   static const _footerGap = 12.0;
   static const _ratingIconSize = 16.0;
   static const _ratingPadding = EdgeInsets.symmetric(vertical: 2);
+  static const _airtimeFontSize = 14.0;
+  static const _airtimeLineHeight = 1.3;
+  static const _airtimeGap = 4.0;
 
   // Shared by the grid and card to keep their text-scaled heights in sync.
-  static double heightFor(TextScaler scaler, {bool compact = false}) {
+  static double heightFor(TextScaler scaler,
+      {bool compact = false, bool withAirtime = false}) {
     final titleHeight = scaler.scale(_titleFontSize) * _titleLineHeight * 2;
     final labelHeight = scaler.scale(_labelFontSize) * _labelLineHeight;
+    // Plus a little slack: CJK fallback fonts render taller than their size.
+    final airtimeHeight = withAirtime
+        ? scaler.scale(_airtimeFontSize) * _airtimeLineHeight + _airtimeGap + 6
+        : 0.0;
     final footerHeight =
         math.max(_ratingIconSize, labelHeight) + _ratingPadding.vertical;
     final contentHeight = math.max(
       compact ? 120.0 : 136.0,
-      titleHeight + _metadataGap + labelHeight + _footerGap + footerHeight,
+      airtimeHeight +
+          titleHeight +
+          _metadataGap +
+          labelHeight +
+          _footerGap +
+          footerHeight,
     );
     return _contentPadding * 2 + contentHeight;
   }
@@ -80,8 +108,8 @@ class BangumiTimelineCard extends StatelessWidget {
         child: InkWell(
           onTap: onTap,
           child: SizedBox(
-            height:
-                heightFor(MediaQuery.textScalerOf(context), compact: compact),
+            height: heightFor(MediaQuery.textScalerOf(context),
+                compact: compact, withAirtime: airtime != null),
             child: Padding(
               padding: const EdgeInsets.all(_contentPadding),
               child: Row(
@@ -110,6 +138,10 @@ class BangumiTimelineCard extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (airtime != null) ...[
+          _buildAirtime(context, airtime!),
+          const SizedBox(height: _airtimeGap),
+        ],
         Text(
           title,
           maxLines: 2,
@@ -157,6 +189,43 @@ class BangumiTimelineCard extends StatelessWidget {
                 ),
               ],
             ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildAirtime(BuildContext context, TimelineAirtime airtime) {
+    final colors = Theme.of(context).colorScheme;
+    final palette = MonoPalette.of(context);
+    final hasTime = airtime.time.isNotEmpty;
+    return Row(
+      children: [
+        if (hasTime)
+          Text(
+            airtime.time,
+            maxLines: 1,
+            style: TextStyle(
+              fontSize: _airtimeFontSize,
+              height: _airtimeLineHeight,
+              fontWeight: FontWeight.w700,
+              color: colors.primary,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        if (airtime.premiere != null) ...[
+          if (hasTime) const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              airtime.premiere!,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: _labelFontSize,
+                height: _airtimeLineHeight,
+                color: palette.secondaryLabel,
+              ),
+            ),
           ),
         ],
       ],

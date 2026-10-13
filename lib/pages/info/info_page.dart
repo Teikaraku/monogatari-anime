@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -9,14 +10,15 @@ import 'package:window_manager/window_manager.dart';
 import 'package:kazumi/bean/appbar/drag_to_move_bar.dart' as dtb;
 import 'package:kazumi/bean/card/bangumi_info_card.dart';
 import 'package:kazumi/bean/card/network_img_layer.dart';
-import 'package:kazumi/bean/dialog/adaptive_bottom_sheet.dart';
 import 'package:kazumi/bean/widget/collect_button.dart';
 import 'package:kazumi/bean/widget/embedded_native_control_area.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
+import 'package:kazumi/modules/bangumi/bangumi_subject_detail.dart';
+import 'package:kazumi/modules/bangumi/episode_item.dart';
 import 'package:kazumi/pages/info/info_actions_menu.dart';
 import 'package:kazumi/pages/info/info_controller.dart';
 import 'package:kazumi/pages/info/info_tabview.dart';
-import 'package:kazumi/pages/info/source_sheet.dart';
+import 'package:kazumi/pages/video/video_playback_args.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/services/platform/desktop_window_config.dart';
 import 'package:kazumi/services/storage/storage.dart';
@@ -38,14 +40,10 @@ class InfoPage extends StatefulWidget {
 
 class _InfoPageState extends State<InfoPage>
     with SingleTickerProviderStateMixin {
-  static const List<String> _infoTabs = <String>[
-    '概览',
-    '角色',
-    '关联',
-    '制作人员',
-  ];
-  static const Duration _minimumBangumiInfoLoadingDuration =
-      Duration(milliseconds: 600);
+  static const List<String> _infoTabs = <String>['概览', '演职人员'];
+  static const Duration _minimumBangumiInfoLoadingDuration = Duration(
+    milliseconds: 600,
+  );
 
   InfoController get infoController => widget.infoController;
   late final TabController infoTabController;
@@ -58,6 +56,12 @@ class _InfoPageState extends State<InfoPage>
   bool staffQueryTimeout = false;
   bool staffIsEmpty = false;
   bool _showBangumiInfoSkeleton = false;
+  BangumiSubjectDetail? _subjectDetail;
+  bool _detailLoading = true;
+
+  /// Null while loading.
+  List<EpisodeInfo>? _episodes;
+  bool _episodesFailed = false;
 
   bool get _isShowingBangumiInfoSkeleton =>
       infoController.isLoading || _showBangumiInfoSkeleton;
@@ -77,8 +81,9 @@ class _InfoPageState extends State<InfoPage>
       charactersIsEmpty = false;
     });
     try {
-      await infoController
-          .queryBangumiCharactersByID(infoController.bangumiItem.id);
+      await infoController.queryBangumiCharactersByID(
+        infoController.bangumiItem.id,
+      );
       if (mounted) {
         setState(() {
           charactersIsLoading = false;
@@ -106,8 +111,9 @@ class _InfoPageState extends State<InfoPage>
       staffIsEmpty = false;
     });
     try {
-      await infoController
-          .queryBangumiStaffsByID(infoController.bangumiItem.id);
+      await infoController.queryBangumiStaffsByID(
+        infoController.bangumiItem.id,
+      );
       if (mounted) {
         setState(() {
           staffIsLoading = false;
@@ -129,11 +135,37 @@ class _InfoPageState extends State<InfoPage>
 
   Future<void> loadRelations() async {
     try {
-      await infoController
-          .queryBangumiRelationsByID(infoController.bangumiItem.id);
+      await infoController.queryBangumiRelationsByID(
+        infoController.bangumiItem.id,
+      );
     } catch (e) {
       KazumiLogger().e('InfoPage: failed to load relations', error: e);
     }
+  }
+
+  Future<void> loadEpisodes() async {
+    try {
+      final episodes = await infoController.queryBangumiMainEpisodesByID(
+        infoController.bangumiItem.id,
+      );
+      if (mounted) {
+        setState(() {
+          _episodes = episodes;
+          _episodesFailed = false;
+        });
+      }
+    } catch (e) {
+      KazumiLogger().e('InfoPage: failed to load episodes', error: e);
+      if (mounted) setState(() => _episodesFailed = true);
+    }
+  }
+
+  void _retryEpisodes() {
+    setState(() {
+      _episodes = null;
+      _episodesFailed = false;
+    });
+    loadEpisodes();
   }
 
   @override
@@ -143,30 +175,26 @@ class _InfoPageState extends State<InfoPage>
     infoController.characterList.clear();
     infoController.staffList.clear();
     infoController.clearRelations();
-    infoController.pluginSearchResponseList.clear();
-    if (_needsBangumiInfoRefresh(infoController.bangumiItem)) {
-      _showBangumiInfoSkeleton = true;
-      _loadBangumiInfo();
-    }
+    // Always fetch the subject: the detail fields come only from this request.
+    final needsRefresh = _needsBangumiInfoRefresh(infoController.bangumiItem);
+    _showBangumiInfoSkeleton = needsRefresh;
+    _loadBangumiInfo(showSkeleton: needsRefresh);
+    loadEpisodes();
+    loadRelations();
     infoTabController = TabController(length: _infoTabs.length, vsync: this);
     showRating = GStorage.getSetting(SettingsKeys.showRating);
     infoTabController.addListener(onInfoTabChanged);
   }
 
   void onInfoTabChanged() {
-    final index = infoTabController.index;
-    if (index == 1 &&
-        infoController.characterList.isEmpty &&
+    if (infoTabController.index != 1) return;
+    if (infoController.characterList.isEmpty &&
         !charactersIsLoading &&
         !charactersIsEmpty &&
         !charactersQueryTimeout) {
       loadCharacters();
     }
-    if (index == 2 && infoController.canLoadRelations) {
-      loadRelations();
-    }
-    if (index == 3 &&
-        infoController.staffList.isEmpty &&
+    if (infoController.staffList.isEmpty &&
         !staffIsLoading &&
         !staffIsEmpty &&
         !staffQueryTimeout) {
@@ -180,36 +208,41 @@ class _InfoPageState extends State<InfoPage>
     infoController.characterList.clear();
     infoController.staffList.clear();
     infoController.clearRelations();
-    infoController.pluginSearchResponseList.clear();
     infoTabController.dispose();
     super.dispose();
   }
 
-  Future<void> _loadBangumiInfo() async {
+  Future<void> _loadBangumiInfo({required bool showSkeleton}) async {
     final loadingStartedAt = DateTime.now();
+    final id = infoController.bangumiItem.id;
+    BangumiSubjectDetail? detail;
     try {
       // Attach metadata without replacing rendered image URLs.
-      await infoController.queryBangumiInfoByID(
-        infoController.bangumiItem.id,
-        type: 'attach',
-      );
+      detail = showSkeleton
+          ? await infoController.queryBangumiInfoByID(id, type: 'attach')
+          : await infoController.refreshBangumiInfoByID(id);
     } catch (e) {
-      KazumiLogger()
-          .e('InfoPage: failed to query bangumi info by ID', error: e);
+      KazumiLogger().e(
+        'InfoPage: failed to query bangumi info by ID',
+        error: e,
+      );
     } finally {
-      if (mounted) {
+      if (mounted && showSkeleton) {
         await _waitForMinimumBangumiInfoLoadingDuration(loadingStartedAt);
       }
       if (mounted) {
         setState(() {
           _showBangumiInfoSkeleton = false;
+          _subjectDetail = detail;
+          _detailLoading = false;
         });
       }
     }
   }
 
   Future<void> _waitForMinimumBangumiInfoLoadingDuration(
-      DateTime loadingStartedAt) async {
+    DateTime loadingStartedAt,
+  ) async {
     final elapsed = DateTime.now().difference(loadingStartedAt);
     final remaining = _minimumBangumiInfoLoadingDuration - elapsed;
     if (remaining > Duration.zero) {
@@ -272,49 +305,70 @@ class _InfoPageState extends State<InfoPage>
                 stretch: true,
                 centerTitle: false,
                 expandedHeight:
-                    308 + kTextTabBarHeight + kToolbarHeight + topOffset,
-                collapsedHeight: kTextTabBarHeight +
+                    BangumiInfoCardV.height +
+                    8 +
+                    kTextTabBarHeight +
+                    kToolbarHeight +
+                    topOffset,
+                collapsedHeight:
+                    kTextTabBarHeight +
                     kToolbarHeight +
                     MediaQuery.paddingOf(context).top +
                     topOffset,
                 flexibleSpace: FlexibleSpaceBar(
                   collapseMode: CollapseMode.pin,
-                  background: Observer(builder: (context) {
-                    final showBangumiInfoSkeleton =
-                        _isShowingBangumiInfoSkeleton;
-                    return Stack(
-                      children: [
-                        if (!showBangumiInfoSkeleton)
-                          Positioned.fill(
-                            bottom: kTextTabBarHeight,
-                            child: IgnorePointer(
-                              child: _InfoHeaderBackground(
-                                imageUrl: infoController
-                                        .bangumiItem.images['large'] ??
-                                    '',
+                  background: Observer(
+                    builder: (context) {
+                      final showBangumiInfoSkeleton =
+                          _isShowingBangumiInfoSkeleton;
+                      return Stack(
+                        children: [
+                          if (!showBangumiInfoSkeleton)
+                            Positioned.fill(
+                              bottom: kTextTabBarHeight,
+                              child: IgnorePointer(
+                                child: _InfoHeaderBackground(
+                                  imageUrl:
+                                      infoController
+                                          .bangumiItem
+                                          .images['large'] ??
+                                      '',
+                                ),
                               ),
                             ),
-                          ),
-                        SafeArea(
-                          bottom: false,
-                          child: EmbeddedNativeControlArea(
-                            child: Align(
-                              alignment: Alignment.topCenter,
-                              child: Padding(
-                                padding: const EdgeInsets.fromLTRB(
-                                    16, kToolbarHeight, 16, 0),
-                                child: BangumiInfoCardV(
-                                  bangumiItem: infoController.bangumiItem,
-                                  isLoading: showBangumiInfoSkeleton,
-                                  showRating: showRating,
+                          _CollapsingHeader(
+                            toolbarBottom:
+                                MediaQuery.paddingOf(context).top +
+                                kToolbarHeight +
+                                topOffset,
+                            child: SafeArea(
+                              bottom: false,
+                              child: EmbeddedNativeControlArea(
+                                child: Align(
+                                  alignment: Alignment.topCenter,
+                                  child: Padding(
+                                    padding: EdgeInsets.fromLTRB(
+                                      16,
+                                      kToolbarHeight + topOffset,
+                                      16,
+                                      0,
+                                    ),
+                                    child: BangumiInfoCardV(
+                                      bangumiItem: infoController.bangumiItem,
+                                      isLoading: showBangumiInfoSkeleton,
+                                      showRating: showRating,
+                                      detail: _subjectDetail,
+                                      detailLoading: _detailLoading,
+                                    ),
+                                  ),
                                 ),
                               ),
                             ),
                           ),
-                        ),
-                      ],
-                    );
-                  }),
+                        ],
+                      );
+                    },
+                  ),
                 ),
                 forceElevated: innerBoxIsScrolled,
                 bottom: TabBar(
@@ -328,37 +382,43 @@ class _InfoPageState extends State<InfoPage>
             ),
           ];
         },
-        body: Observer(builder: (context) {
-          final showBangumiInfoSkeleton = _isShowingBangumiInfoSkeleton;
-          return InfoTabView(
-            tabController: infoTabController,
-            bangumiItem: infoController.bangumiItem,
-            charactersQueryTimeout: charactersQueryTimeout,
-            charactersIsEmpty: charactersIsEmpty,
-            staffQueryTimeout: staffQueryTimeout,
-            staffIsEmpty: staffIsEmpty,
-            loadCharacters: loadCharacters,
-            loadStaff: loadStaff,
-            characterList: infoController.characterList,
-            staffList: infoController.staffList,
-            relationList: infoController.relationList,
-            relationsIsLoading: infoController.relationsIsLoading,
-            relationsQueryTimeout: infoController.relationsQueryTimeout,
-            relationsHasLoaded: infoController.relationsHasLoaded,
-            loadRelations: loadRelations,
-            isLoading: showBangumiInfoSkeleton,
-          );
-        }),
+        body: Observer(
+          builder: (context) {
+            final showBangumiInfoSkeleton = _isShowingBangumiInfoSkeleton;
+            return InfoTabView(
+              tabController: infoTabController,
+              bangumiItem: infoController.bangumiItem,
+              isLoading: showBangumiInfoSkeleton,
+              showRating: showRating,
+              subjectDetail: _subjectDetail,
+              detailLoading: _detailLoading,
+              episodes: _episodes,
+              episodesFailed: _episodesFailed,
+              loadEpisodes: _retryEpisodes,
+              characterList: infoController.characterList,
+              charactersQueryTimeout: charactersQueryTimeout,
+              charactersIsEmpty: charactersIsEmpty,
+              loadCharacters: loadCharacters,
+              staffList: infoController.staffList,
+              staffQueryTimeout: staffQueryTimeout,
+              staffIsEmpty: staffIsEmpty,
+              loadStaff: loadStaff,
+              relationList: infoController.relationList,
+              relationsQueryTimeout: infoController.relationsQueryTimeout,
+              relationsHasLoaded: infoController.relationsHasLoaded,
+              loadRelations: loadRelations,
+            );
+          },
+        ),
       ),
       floatingActionButton: FloatingActionButton.extended(
         tooltip: '开始观看',
         onPressed: () {
-          showAdaptiveBottomSheet<void>(
-            context: context,
-            maxHeightFactor: 0.88,
-            builder: (context) {
-              return SourceSheet(infoController: infoController);
-            },
+          context.pushNamed(
+            '/video/',
+            arguments: OnlineVideoPlaybackArgs(
+              bangumiItem: infoController.bangumiItem,
+            ),
           );
         },
         label: const Text('开始观看'),
@@ -368,10 +428,54 @@ class _InfoPageState extends State<InfoPage>
   }
 }
 
+/// Fades the header out as the app bar collapses and clips it at the toolbar's
+/// bottom edge, so the title never slides under the back button.
+class _CollapsingHeader extends StatelessWidget {
+  const _CollapsingHeader({required this.toolbarBottom, required this.child});
+
+  /// Bottom of the toolbar, measured from the top of the app bar.
+  final double toolbarBottom;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = context
+        .dependOnInheritedWidgetOfExactType<FlexibleSpaceBarSettings>();
+    var scrolled = 0.0;
+    var collapse = 0.0;
+    if (settings != null) {
+      // CollapseMode.pin moves the background up by exactly this much.
+      scrolled = settings.maxExtent - settings.currentExtent;
+      final range = settings.maxExtent - settings.minExtent;
+      collapse = range <= 0 ? 0 : (scrolled / range).clamp(0.0, 1.0);
+    }
+    return ClipRect(
+      clipper: _TopInsetClipper(math.max(0, toolbarBottom + scrolled)),
+      // Stay opaque through the first half; the clip already keeps the
+      // toolbar clear, the fade only eases the last stretch.
+      child: Opacity(
+        opacity: ((1 - collapse) / 0.45).clamp(0.0, 1.0),
+        child: child,
+      ),
+    );
+  }
+}
+
+class _TopInsetClipper extends CustomClipper<Rect> {
+  const _TopInsetClipper(this.top);
+
+  final double top;
+
+  @override
+  Rect getClip(Size size) =>
+      Rect.fromLTRB(0, math.min(top, size.height), size.width, size.height);
+
+  @override
+  bool shouldReclip(_TopInsetClipper oldClipper) => oldClipper.top != top;
+}
+
 class _InfoHeaderBackground extends StatelessWidget {
-  const _InfoHeaderBackground({
-    required this.imageUrl,
-  });
+  const _InfoHeaderBackground({required this.imageUrl});
 
   static const double _downsample = 0.5;
   static const double _blurSigma = 15.0;
@@ -409,10 +513,7 @@ class _InfoHeaderBackground extends StatelessWidget {
                   return const LinearGradient(
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
-                    colors: [
-                      Colors.white,
-                      Colors.transparent,
-                    ],
+                    colors: [Colors.white, Colors.transparent],
                     stops: [0.8, 1],
                   ).createShader(bounds);
                 },

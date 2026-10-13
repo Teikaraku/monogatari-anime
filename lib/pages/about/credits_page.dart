@@ -17,9 +17,15 @@ class CreditsPage extends StatelessWidget {
               title: '贡献',
               children: const [
                 AboutLinkTile(
+                  icon: Icons.code_rounded,
+                  title: 'Kazumi',
+                  subtitle: '上游项目',
+                  url: ApiEndpoints.upstreamSourceUrl,
+                ),
+                AboutLinkTile(
                   icon: Icons.people_outline_rounded,
-                  title: '贡献者',
-                  url: '${ApiEndpoints.sourceUrl}/graphs/contributors',
+                  title: 'Kazumi 贡献者',
+                  url: '${ApiEndpoints.upstreamSourceUrl}/graphs/contributors',
                 ),
                 AboutLinkTile(
                   icon: Icons.brush_rounded,

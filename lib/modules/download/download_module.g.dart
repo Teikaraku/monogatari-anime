@@ -23,13 +23,14 @@ class DownloadRecordAdapter extends TypeAdapter<DownloadRecord> {
       fields[3] as String,
       (fields[4] as Map).cast<int, DownloadEpisode>(),
       fields[5] as DateTime,
+      sourceSubject: fields[6] as BangumiItem?,
     );
   }
 
   @override
   void write(BinaryWriter writer, DownloadRecord obj) {
     writer
-      ..writeByte(6)
+      ..writeByte(7)
       ..writeByte(0)
       ..write(obj.bangumiId)
       ..writeByte(1)
@@ -41,7 +42,9 @@ class DownloadRecordAdapter extends TypeAdapter<DownloadRecord> {
       ..writeByte(4)
       ..write(obj.episodes)
       ..writeByte(5)
-      ..write(obj.createdAt);
+      ..write(obj.createdAt)
+      ..writeByte(6)
+      ..write(obj.sourceSubject);
   }
 
   @override
@@ -82,13 +85,15 @@ class DownloadEpisodeAdapter extends TypeAdapter<DownloadEpisode> {
       fields[13] == null ? '' : fields[13] as String,
       danmakuData: fields[14] == null ? '' : fields[14] as String,
       danDanBangumiID: fields[15] == null ? 0 : (fields[15] as num).toInt(),
+      apiEpisodeNumber: (fields[16] as num?)?.toDouble(),
+      apiEpisodeKey: fields[17] == null ? '' : fields[17] as String,
     );
   }
 
   @override
   void write(BinaryWriter writer, DownloadEpisode obj) {
     writer
-      ..writeByte(16)
+      ..writeByte(18)
       ..writeByte(0)
       ..write(obj.episodeNumber)
       ..writeByte(1)
@@ -120,7 +125,11 @@ class DownloadEpisodeAdapter extends TypeAdapter<DownloadEpisode> {
       ..writeByte(14)
       ..write(obj.danmakuData)
       ..writeByte(15)
-      ..write(obj.danDanBangumiID);
+      ..write(obj.danDanBangumiID)
+      ..writeByte(16)
+      ..write(obj.apiEpisodeNumber)
+      ..writeByte(17)
+      ..write(obj.apiEpisodeKey);
   }
 
   @override

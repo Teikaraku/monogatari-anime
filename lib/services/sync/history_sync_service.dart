@@ -17,7 +17,7 @@ class HistorySyncService {
   static const String _pendingLogPrefix = 'history.local.pending.';
 
   HistorySyncService._internal()
-      : _applicationSupportDirectoryProvider = getApplicationSupportDirectory;
+    : _applicationSupportDirectoryProvider = getApplicationSupportDirectory;
 
   static final HistorySyncService _instance = HistorySyncService._internal();
 
@@ -25,8 +25,8 @@ class HistorySyncService {
 
   @visibleForTesting
   HistorySyncService.forTesting(Directory applicationSupportDirectory)
-      : _applicationSupportDirectoryProvider =
-            (() async => applicationSupportDirectory);
+    : _applicationSupportDirectoryProvider = (() async =>
+          applicationSupportDirectory);
 
   final Future<Directory> Function() _applicationSupportDirectoryProvider;
   final AsyncSerialQueue _localLogQueue = AsyncSerialQueue();
@@ -90,11 +90,7 @@ class HistorySyncService {
     await _localLogQueue.run(() async {
       final file = await localChangeLogFile();
       await file.parent.create(recursive: true);
-      await file.writeAsString(
-        content,
-        mode: FileMode.append,
-        flush: true,
-      );
+      await file.writeAsString(content, mode: FileMode.append, flush: true);
     });
   }
 
@@ -156,7 +152,10 @@ class HistorySyncService {
             lastSrc: history.lastSrc,
             lastWatchEpisodeName: history.lastWatchEpisodeName,
             entryKind: history.entryKind,
-            episodePageUrl: history.episodePageUrl,
+            episodePageUrl: HistorySyncCodec.progressEpisodePageUrl(
+              history,
+              progress.episode,
+            ),
           ),
         );
       }
@@ -223,10 +222,12 @@ class HistorySyncService {
       await runDirectory.create(recursive: true);
 
       final pendingFiles = await _pendingLocalLogFiles(activeFile.parent);
-      final activeLength =
-          await activeFile.exists() ? await activeFile.length() : 0;
+      final activeLength = await activeFile.exists()
+          ? await activeFile.length()
+          : 0;
       final pendingLength = await _totalFileLength(pendingFiles);
-      final shouldCheckpoint = forceCheckpoint ||
+      final shouldCheckpoint =
+          forceCheckpoint ||
           pendingFiles.isNotEmpty ||
           activeLength + pendingLength > checkpointLogThresholdBytes;
 
@@ -243,27 +244,18 @@ class HistorySyncService {
           pendingFiles.add(pendingFile);
         }
         pendingFiles.sort((a, b) => a.path.compareTo(b.path));
-        return HistorySyncLogBatch(
-          files: pendingFiles,
-          shouldCheckpoint: true,
-        );
+        return HistorySyncLogBatch(files: pendingFiles, shouldCheckpoint: true);
       }
 
       if (activeLength == 0) {
-        return HistorySyncLogBatch(
-          files: [],
-          shouldCheckpoint: false,
-        );
+        return HistorySyncLogBatch(files: [], shouldCheckpoint: false);
       }
 
       final stableCopy = File(
         '${runDirectory.path}${Platform.pathSeparator}local-events.jsonl',
       );
       await activeFile.copy(stableCopy.path);
-      return HistorySyncLogBatch(
-        files: [stableCopy],
-        shouldCheckpoint: false,
-      );
+      return HistorySyncLogBatch(files: [stableCopy], shouldCheckpoint: false);
     });
   }
 
@@ -368,7 +360,8 @@ class HistorySyncService {
       File file,
       Object error,
       StackTrace stackTrace,
-    ) onInvalidFile,
+    )
+    onInvalidFile,
   }) async {
     var mergedSnapshot = snapshot;
     for (final file in eventFiles) {
@@ -394,10 +387,7 @@ class HistorySyncService {
     await Isolate.run(() async {
       final target = File(path);
       await target.parent.create(recursive: true);
-      await target.writeAsString(
-        jsonEncode(snapshotJson),
-        flush: true,
-      );
+      await target.writeAsString(jsonEncode(snapshotJson), flush: true);
     });
   }
 
@@ -417,8 +407,9 @@ class HistorySyncService {
 
   Future<void> appendSafely(Future<void> Function() append) async {
     final webDavEnable = GStorage.getSetting(SettingsKeys.webDavEnable);
-    final historySyncEnable =
-        GStorage.getSetting(SettingsKeys.webDavEnableHistory);
+    final historySyncEnable = GStorage.getSetting(
+      SettingsKeys.webDavEnableHistory,
+    );
     if (webDavEnable != true || historySyncEnable != true) {
       return;
     }

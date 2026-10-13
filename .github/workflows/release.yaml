@@ -1,575 +1,219 @@
----
-    name: "release"
-    
-    on:
-      push:
-        tags:
-          - "*"
-      workflow_dispatch:
-        inputs:
-          logLevel:
-            description: 'Log level'     
-            required: true
-            default: 'warning'
+name: Production builds
 
-    jobs:
-      flutter-test:
-        runs-on: "ubuntu-latest"
-        permissions:
-          contents: read
-        steps:
-          - name: Clone repository
-            uses: actions/checkout@v4
-          - name: Set up Flutter
-            uses: subosito/flutter-action@v2.16.0
-            with:
-              channel: stable
-              flutter-version-file: pubspec.yaml
-          - name: Get Flutter dependencies
-            run: flutter pub get
-            shell: bash
-          - name: Install native build tools
-            run: |
-              sudo apt-get update
-              sudo apt-get install -y cmake ninja-build g++
-            shell: bash
-          - name: Run Flutter tests
-            run: flutter test
-            shell: bash
+on:
+  push:
+    branches: ['codex/production-*']
+    tags: ['monogatari-v*']
+  workflow_dispatch:
 
-      flutter-analyze:
-        runs-on: "ubuntu-latest"
-        permissions:
-          contents: read
-        steps:
-          - name: Clone repository
-            uses: actions/checkout@v4
-          - name: Set up Flutter
-            uses: subosito/flutter-action@v2.16.0
-            with:
-              channel: stable
-              flutter-version-file: pubspec.yaml
-          - name: Get Flutter dependencies
-            run: flutter pub get
-            shell: bash
-          - name: Analyze Flutter project
-            run: flutter analyze --no-fatal-infos --fatal-warnings
-            shell: bash
+permissions:
+  contents: read
 
-      flutter-build-android:
-        name: "Release for android"
-        needs: [flutter-test, flutter-analyze]
-        runs-on: "ubuntu-latest" 
-        permissions: write-all
-        steps:
-          - name: Clone repository
-            uses: actions/checkout@v4
-          - name: Extract tag name
-            run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-            shell: bash
-          - name: Echo build progress
-            run: echo "Monogatari_android_${{ env.tag }}.apk build progress"
-            shell: bash
-          - name: Install dependencies
-            run: |
-              sudo apt-get update
-              sudo apt-get install -y clang cmake libgtk-3-dev ninja-build libayatana-appindicator3-dev libasound2-dev
-            shell: bash
-          - name: Set up JDK 17
-            uses: actions/setup-java@v4
-            with:
-              java-version: '17'
-              distribution: 'temurin'          
-          - name: Set up Flutter
-            uses: subosito/flutter-action@v2.16.0
-            id: flutter-action
-            with:
-              channel: stable
-              flutter-version-file: pubspec.yaml
-          - name: Get Flutter dependencies
-            run: flutter pub get
-            shell: bash
-          - name: Remove build id
-            run: sed -i -e 's/-Wl,/-Wl,--build-id=none,/' ${{ steps.flutter-action.outputs.PUB-CACHE-PATH }}/hosted/pub.dev/jni-*/src/CMakeLists.txt
-          - name: Build Flutter for Android
-            run: >-
-              flutter build apk --split-per-abi
-            shell: bash
-          - name: Package android build output
-            run: cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk Monogatari_android_${env:tag}.apk
-            shell: bash
+concurrency:
+  group: production-${{ github.ref }}
+  cancel-in-progress: true
 
-          - name: Upload android outputs
-            uses: actions/upload-artifact@v4
-            with:
-              name: android_outputs
-              path: Monogatari_android_*.apk
+jobs:
+  verify:
+    name: Tests and analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+          cache: true
+      - name: Native test tools
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++
+      - run: flutter pub get
+      - run: flutter analyze --no-fatal-infos --fatal-warnings
+      - run: flutter test
 
-      flutter-build-windows:
-        name: "Release for windows"
-        runs-on: "windows-latest"
-        needs: [flutter-build-android, flutter-build-ios, flutter-build-linux-amd64, flutter-build-linux-arm64, flutter-build-macos]
-        permissions: write-all
-    
-        steps:
-          - name: Clone repository
-            uses: actions/checkout@v4
-          - run: |
-                  $tag = "${{ github.ref }}".Replace('refs/tags/', '')
-                  echo "tag=$(echo $tag)" >> $env:GITHUB_ENV
-          - run: echo "Monogatari_windows_${env:tag}.zip build progress"
-          - run: choco install yq
-          - name: Enable Git longpaths
-            run: git config --system core.longpaths true
-          - name: Set up Flutter
-            uses: subosito/flutter-action@v2.16.0
-            with:
-              channel: stable
-              flutter-version-file: pubspec.yaml
-          - name: Set up Java
-            uses: actions/setup-java@v4
-            with:
-              distribution: 'temurin'
-              java-version: '18'
-          - run: flutter pub get
-          - run: >-
-              flutter build windows
-          - run: Compress-Archive build/windows/x64/runner/Release/* Monogatari_windows_${env:tag}.zip
-          - name: Upload windows outputs
-            uses: actions/upload-artifact@v4
-            id: unsigned-windows-zip-artifacts
-            with:
-              name: windows_outputs
-              path: |
-                Monogatari_windows_*.zip
+  android:
+    name: Android release (production signed)
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+          cache: true
+      - run: flutter pub get
+      - name: Configure private production key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.MONOGATARI_ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.MONOGATARI_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MONOGATARI_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.MONOGATARI_ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          test -n "$KEYSTORE_BASE64" && test -n "$KEYSTORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/monogatari-release.jks"
+          chmod 600 "$RUNNER_TEMP/monogatari-release.jks"
+          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$RUNNER_TEMP/monogatari-release.jks" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
+      - name: Build optimized APKs and app bundle
+        run: |
+          flutter build apk --release --split-per-abi --no-pub
+          flutter build appbundle --release --no-pub
+      - name: Package release
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk dist/Monogatari-Android-arm64.apk
+          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk dist/Monogatari-Android-armv7.apk
+          cp build/app/outputs/flutter-apk/app-x86_64-release.apk dist/Monogatari-Android-x64.apk
+          cp build/app/outputs/bundle/release/app-release.aab dist/Monogatari-Android.aab
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Monogatari-Android-release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove private key from runner
+        if: always()
+        run: rm -f android/key.properties "$RUNNER_TEMP/monogatari-release.jks"
 
-          # Sign Zip
-          - run: New-Item -Path "build/windows/zip_signed_output" -ItemType Directory
-          - name: sign windows zip
-            uses: signpath/github-action-submit-signing-request@v1.1
-            with:
-              api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-              organization-id: 'fa047255-4772-4be1-b14f-5cfa62635877'
-              project-slug: 'Kazumi'
-              signing-policy-slug: 'release-signing'
-              artifact-configuration-slug: 'Packet'
-              github-artifact-id: '${{ steps.unsigned-windows-zip-artifacts.outputs.artifact-id }}'
-              wait-for-completion: true
-              output-artifact-directory: 'build/windows/zip_signed_output'
-          
-          - name: Upload windows zip signed ouputs
-            uses: actions/upload-artifact@v4
-            id: signed-windows-zip-artifacts
-            with:
-              name: windows_zip_signed_outputs
-              path: build/windows/zip_signed_output/*.zip
-              
-          # Replace Unpacked Artifact with Signed Artifact
-          - name: Replace Unpacked Artifact with Signed Artifact
-            run: Expand-Archive -Path "build/windows/zip_signed_output/Monogatari_windows_${env:tag}.zip" -DestinationPath "build/windows/x64/runner/Release" -Force
-          
-          # Build Unsigned MSIX
-          - name: Build unsigned msix
-            run: dart run msix:create
-          - name: Upload windows msix ouputs
-            uses: actions/upload-artifact@v4
-            id: unsigned-windows-msix-artifacts
-            with:
-              name: windows_msix_outputs
-              path: |
-                build/windows/x64/runner/Release/Monogatari.msix
-          
-          # Sign MSIX
-          - run: New-Item -Path "build/windows/msix_signed_output" -ItemType Directory
-          - name: sign windows msix
-            uses: signpath/github-action-submit-signing-request@v1.1
-            with:
-              api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-              organization-id: 'fa047255-4772-4be1-b14f-5cfa62635877'
-              project-slug: 'Kazumi'
-              signing-policy-slug: 'release-signing'
-              artifact-configuration-slug: 'MSIX'
-              github-artifact-id: '${{ steps.unsigned-windows-msix-artifacts.outputs.artifact-id }}'
-              wait-for-completion: true
-              output-artifact-directory: 'build/windows/msix_signed_output'
-          
-          - name: Upload windows msix signed ouputs
-            uses: actions/upload-artifact@v4
-            id: signed-windows-msix-artifacts
-            with:
-              name: windows_msix_signed_outputs
-              path: build/windows/msix_signed_output/*.msix
+  windows:
+    name: Windows release (portable)
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable dependency long paths
+        run: git config --global core.longpaths true
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+          cache: true
+      - run: flutter pub get
+      - name: Verify native Windows update helper
+        run: flutter test test/windows_update_installer_test.dart
+      - run: flutter build windows --release --no-pub
+      - name: Package complete executable bundle
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $visualStudio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $visualStudio) { throw 'Visual C++ tools are unavailable.' }
+          $redistRoot = Join-Path $visualStudio 'VC/Redist/MSVC'
+          $runtime = Get-ChildItem -LiteralPath $redistRoot -Directory -Recurse -Filter 'Microsoft.VC*.CRT' |
+            Where-Object { $_.Parent.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $runtime) { throw 'The x64 Visual C++ runtime is unavailable.' }
+          foreach ($name in @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
+            $source = Join-Path $runtime.FullName $name
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing runtime: $name" }
+            Copy-Item -LiteralPath $source -Destination build/windows/x64/runner/Release/
+          }
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath dist/Monogatari-Windows-x64.zip
+          $hash = (Get-FileHash -Algorithm SHA256 dist/Monogatari-Windows-x64.zip).Hash.ToLowerInvariant()
+          "$hash  Monogatari-Windows-x64.zip" | Set-Content dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Monogatari-Windows-release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
 
-      flutter-build-linux-amd64:
-        name: "Release for Linux amd64"
-        needs: [flutter-test, flutter-analyze]
-        runs-on: "ubuntu-latest" 
-        permissions: write-all
-        steps:
-          - name: Clone repository
-            uses: actions/checkout@v4
-          - name: Extract tag name
-            run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-            shell: bash
-          - name: Echo build progress
-            run: echo "Monogatari_linux_${{ env.tag }}_amd64.tar.gz build progress"
-            shell: bash
-          - name: Install dependencies
-            run: |
-              sudo apt-get update
-              sudo apt-get install -y clang cmake libgtk-3-dev ninja-build libayatana-appindicator3-dev unzip webkit2gtk-4.1 libasound2-dev
-              sudo apt-get install -y gcc g++ autoconf automake debhelper glslang-dev ladspa-sdk xutils-dev libasound2-dev \
-                  libarchive-dev libbluray-dev libbs2b-dev libcaca-dev libcdio-paranoia-dev libdrm-dev \
-                  libdav1d-dev libdvdnav-dev libegl1-mesa-dev libepoxy-dev libfontconfig-dev libfreetype6-dev \
-                  libfribidi-dev libgl1-mesa-dev libgbm-dev libgme-dev libgsm1-dev libharfbuzz-dev libjpeg-dev \
-                  libbrotli-dev liblcms2-dev libmodplug-dev libmp3lame-dev libopenal-dev \
-                  libopus-dev libopencore-amrnb-dev libopencore-amrwb-dev libpulse-dev librtmp-dev \
-                  libsdl2-dev libsixel-dev libssh-dev libsoxr-dev libspeex-dev libtool \
-                  libv4l-dev libva-dev libvdpau-dev libvorbis-dev libvo-amrwbenc-dev \
-                  libunwind-dev libvpx-dev libwayland-dev libx11-dev libxext-dev \
-                  libxkbcommon-dev libxrandr-dev libxss-dev libxv-dev libxvidcore-dev \
-                  linux-libc-dev nasm ninja-build pkg-config python3 python3-docutils wayland-protocols \
-                  x11proto-core-dev zlib1g-dev libfdk-aac-dev libtheora-dev libwebp-dev \
-                  unixodbc-dev libpq-dev libxxhash-dev libaom-dev              
-            shell: bash
-          - name: Set up Flutter
-            uses: subosito/flutter-action@v2.16.0
-            with:
-              channel: stable
-              flutter-version-file: pubspec.yaml
-          - name: Get Flutter dependencies
-            run: flutter pub get
-            shell: bash
-          - name: Build Flutter for Linux
-            run: >-
-              flutter build linux
-            shell: bash
-          # - name: Download FFmpeg Assets
-          #   uses: dsaltares/fetch-gh-release-asset@master
-          #   with:
-          #     repo: 'Predidit/avbuild'
-          #     version: 'tags/1.1.0'
-          #     file: 'ffmpeg_linux_amd64.zip'
-          #     token: ${{ secrets.GITHUB_TOKEN }}
-          # - run: rm -f build/linux/x64/release/bundle/lib/libffmpeg.so.7
-          # - run: unzip ffmpeg_linux_amd64.zip -d build/linux/x64/release/bundle/lib
-          - name: Package linux amd64 build output
-            run: |
-              # Tarball package
-              tar -zcvf Monogatari_linux_${{ env.tag }}_amd64.tar.gz -C build/linux/x64/release/bundle .
+  ios:
+    name: iOS release (unsigned IPA for sideload signing)
+    needs: verify
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+          cache: true
+      - name: Native build tools
+        run: brew list cmake ninja >/dev/null 2>&1 || brew install cmake ninja
+      - run: flutter pub get
+      - run: flutter build ios --release --no-codesign --no-pub
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p dist/Payload
+          cp -R build/ios/iphoneos/Runner.app dist/Payload/Runner.app
+          find dist/Payload/Runner.app/Frameworks -type d -name '*.framework' -exec codesign --force --sign - --preserve-metadata=identifier,entitlements {} +
+          (cd dist && zip -q -r Monogatari-iOS-unsigned.ipa Payload)
+          rm -rf dist/Payload
+          (cd dist && shasum -a 256 *.ipa > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Monogatari-iOS-release-unsigned
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
 
-              # Debian package
-              mkdir Monogatari_linux_${{ env.tag }}_amd64
-              cd Monogatari_linux_${{ env.tag }}_amd64
-              mkdir -p opt/Monogatari
-              mkdir -p usr/share/applications
-              mkdir -p usr/share/icons/hicolor/512x512/apps
-              cp -r ../build/linux/x64/release/bundle/* opt/Monogatari
-              cp -r ../assets/linux/DEBIAN .
-              chmod 0755 DEBIAN/postinst
-              chmod 0755 DEBIAN/postrm
-
-              cat>DEBIAN/control<<EOF
-              Maintainer: madoka773 <valigarmanda55@gmail.com>
-              Package: monogatari
-              Version: ${{ env.tag }}
-              Section: x11
-              Priority: optional
-              Architecture: amd64
-              Essential: no
-              Installed-Size: 34648
-              Description: Watch Animes online with danmaku support.
-              Homepage: https://github.com/Predidit/Kazumi
-              Depends: libayatana-appindicator3-1,
-                       gir1.2-ayatanaappindicator3-0.1,
-                       libwebkit2gtk-4.1-0
-              EOF
-
-              cp ../assets/linux/io.github.Predidit.Kazumi.desktop usr/share/applications
-              cp ../assets/images/logo/logo_linux.png usr/share/icons/hicolor/512x512/apps/io.github.Predidit.Kazumi.png
-
-              cd ..
-              dpkg-deb --build --root-owner-group Monogatari_linux_${{ env.tag }}_amd64
-            shell: bash
-
-          - name: Upload linux amd64 outputs
-            uses: actions/upload-artifact@v4
-            with:
-              name: linux_amd64_outputs
-              path: |
-                Monogatari_linux_*.tar.gz
-                Monogatari_linux_*.deb
-
-      flutter-build-linux-arm64:
-        name: "Release for Linux arm64"
-        needs: [flutter-test, flutter-analyze]
-        runs-on: ${{ vars.LINUX_ARM64_RUNNER || 'ubuntu-24.04-arm' }}
-        permissions: write-all
-        steps:
-          - name: Clone repository
-            uses: actions/checkout@v4
-          - name: Extract tag name
-            run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-            shell: bash
-          - name: Echo build progress
-            run: echo "Monogatari_linux_${{ env.tag }}_arm64 build progress"
-            shell: bash
-          - name: Set up Flutter for ARM64
-            uses: ./.github/actions/flutter-arm64-setup
-            with:
-              channel: stable
-              flutter-version-file: pubspec.yaml
-          - name: Install project dependencies
-            run: |
-              sudo apt-get update
-              sudo apt-get install -y cmake libwebkit2gtk-4.1-dev libsoup-3.0-dev libasound2-dev \
-                libayatana-appindicator3-dev libepoxy-dev libmpv-dev unzip
-            shell: bash
-          - name: Get Flutter dependencies
-            run: flutter pub get
-            shell: bash
-          - name: Build Flutter for Linux ARM64
-            run: >-
-              flutter build linux
-            shell: bash
-          - name: Package linux arm64 build output
-            run: |
-              # Tarball package
-              tar -zcvf Monogatari_linux_${{ env.tag }}_arm64.tar.gz -C build/linux/arm64/release/bundle .
-
-              # Debian package
-              mkdir Monogatari_linux_${{ env.tag }}_arm64
-              cd Monogatari_linux_${{ env.tag }}_arm64
-              mkdir -p opt/Monogatari
-              mkdir -p usr/share/applications
-              mkdir -p usr/share/icons/hicolor/512x512/apps
-              cp -r ../build/linux/arm64/release/bundle/* opt/Monogatari
-              cp -r ../assets/linux/DEBIAN .
-              chmod 0755 DEBIAN/postinst
-              chmod 0755 DEBIAN/postrm
-
-              cat>DEBIAN/control<<EOF
-              Maintainer: madoka773 <valigarmanda55@gmail.com>
-              Package: monogatari
-              Version: ${{ env.tag }}
-              Section: x11
-              Priority: optional
-              Architecture: arm64
-              Essential: no
-              Installed-Size: $(du -sk opt | cut -f1)
-              Description: Watch Animes online with danmaku support.
-              Homepage: https://github.com/Predidit/Kazumi
-              Depends: libayatana-appindicator3-1,
-                       gir1.2-ayatanaappindicator3-0.1,
-                       libwebkit2gtk-4.1-0
-              EOF
-
-              cp ../assets/linux/io.github.Predidit.Kazumi.desktop usr/share/applications
-              cp ../assets/images/logo/logo_linux.png usr/share/icons/hicolor/512x512/apps/io.github.Predidit.Kazumi.png
-
-              cd ..
-              dpkg-deb --build --root-owner-group Monogatari_linux_${{ env.tag }}_arm64
-            shell: bash
-
-          - name: Upload linux arm64 outputs
-            uses: actions/upload-artifact@v4
-            with:
-              name: linux_arm64_outputs
-              path: |
-                Monogatari_linux_*.tar.gz
-                Monogatari_linux_*.deb
-
-      flutter-build-ios:
-        name: "Release for iOS"
-        needs: [flutter-test, flutter-analyze]
-        runs-on: "macos-latest"
-        permissions: write-all
-
-        steps:
-          - name: Clone repository
-            uses: actions/checkout@v4
-          - name: Extract tag name
-            run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-          - name: Echo build progress
-            run: echo "Monogatari_ios_${{ env.tag }}.ipa build progress"
-          - name: Set up Flutter
-            uses: subosito/flutter-action@v2.16.0
-            with:
-              channel: stable
-              flutter-version-file: pubspec.yaml
-          - run: flutter pub get
-          - name: Install native build tools
-            run: brew install cmake ninja
-          - name: Build IPA
-            run: >-
-              flutter build ios --release --no-codesign
-          - name: Create IPA
-            run: |
-              mkdir Payload
-              cp -R build/ios/iphoneos/Runner.app Payload/Runner.app
-              find Payload/Runner.app/Frameworks -type d -name "*.framework" -exec codesign --force --sign - --preserve-metadata=identifier,entitlements {} \;
-              zip -q -r Monogatari_ios_${{ env.tag }}_no_sign.ipa Payload
-          - name: Upload iOS build
-            uses: actions/upload-artifact@v4
-            with:
-              name: ios_outputs
-              path: Monogatari_ios_*.ipa
-
-      flutter-build-macos:
-        name: "Release for Macos"
-        needs: [flutter-test, flutter-analyze]
-        runs-on: "macos-latest"
-        permissions: write-all
-
-        steps:
-          - name: Clone repository
-            uses: actions/checkout@v4
-          - name: Extract tag name
-            run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-          - name: Echo build progress
-            run: echo "Monogatari_macos_${{ env.tag }}.dmg build progress"
-          - name: Set up Flutter
-            uses: subosito/flutter-action@v2.16.0
-            with:
-              channel: stable
-              flutter-version-file: pubspec.yaml
-          - run: flutter pub get
-          - name: Install native build tools
-            run: brew install cmake ninja
-          - run: >-
-              flutter build macos --release
-          - name: Create DMG
-            run: |
-              npm install --global create-dmg
-              create-dmg build/macos/Build/Products/Release/Monogatari.app
-            continue-on-error: true
-          - name: Rename DMG
-            run: mv Monogatari*.dmg Monogatari_macos_${{ env.tag }}.dmg
-          - name: Upload MacOS build
-            uses: actions/upload-artifact@v4
-            with:
-              name: macos_outputs
-              path: Monogatari_macos_*.dmg
-
-      release:
-        name: "Release"
-        runs-on: "ubuntu-latest"
-        needs: [flutter-build-windows] 
-        permissions: write-all
-        steps:
-          - name: Clone repository
-            uses: actions/checkout@v4
-          - name: Extract tag name
-            run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-            shell: bash
-          - name: Set up JDK 17
-            uses: actions/setup-java@v4
-            with:
-              java-version: '17'
-              distribution: 'temurin'          
-          - name: Setup Android SDK
-            uses: android-actions/setup-android@v3
-            with:
-              packages: 'platform-tools'
-          - name: Setup Android build tools
-            run: sdkmanager "build-tools;34.0.0"
-  
-          - name: Download windows zip build file
-            uses: actions/download-artifact@v4
-            with:
-              name: windows_zip_signed_outputs
-              path: windows_zip_signed_outputs 
-          - name: List files in windows_outputs directory
-            run: ls -l windows_zip_signed_outputs   
-          - name: Copy windows build file to root
-            run: cp windows_zip_signed_outputs/* Monogatari_windows_${{ env.tag }}.zip
-
-          - name: Download windows msix build file
-            uses: actions/download-artifact@v4
-            with:
-              name: windows_msix_signed_outputs
-              path: windows_msix_signed_outputs  
-          - name: List files in windows_msix_signed_outputs directory
-            run: ls -l windows_msix_signed_outputs   
-          - name: Copy windows build file to root
-            run: cp windows_msix_signed_outputs/* Monogatari_windows_${{ env.tag }}.msix
-
-          - name: Download android build file
-            uses: actions/download-artifact@v4
-            with:
-              name: android_outputs
-              path: android_outputs 
-          - name: List files in android_outputs directory
-            run: ls -l android_outputs   
-          - name: Copy android build file to unsigned floder
-            run: | 
-              mkdir build
-              mkdir build/unsigned
-              mkdir build/signed
-              cp android_outputs/* build/unsigned/Monogatari_android_${{ env.tag }}.apk
-
-          - name: Download iOS build file
-            uses: actions/download-artifact@v4
-            with:
-              name: ios_outputs
-              path: ios_outputs  
-          - name: List files in ios_outputs directory
-            run: ls -l ios_outputs   
-          - name: Copy ios build file to root
-            run: cp ios_outputs/* Monogatari_ios_${{ env.tag }}_no_sign.ipa
-
-          - name: Download macos build file
-            uses: actions/download-artifact@v4
-            with:
-              name: macos_outputs
-              path: macos_outputs  
-          - name: List files in macos_outputs directory
-            run: ls -l macos_outputs   
-          - name: Copy macos build file to root
-            run: cp macos_outputs/* Monogatari_macos_${{ env.tag }}.dmg
-            
-          - name: Download linux amd64 build file
-            uses: actions/download-artifact@v4
-            with:
-              name: linux_amd64_outputs
-              path: linux_amd64_outputs
-          - name: List files in linux_amd64_outputs directory
-            run: ls -l linux_amd64_outputs
-          - name: Copy linux amd64 build file to root
-            run: cp linux_amd64_outputs/* .
-
-          - name: Download linux arm64 build file
-            uses: actions/download-artifact@v4
-            with:
-              name: linux_arm64_outputs
-              path: linux_arm64_outputs
-          - name: List files in linux_arm64_outputs directory
-            run: ls -l linux_arm64_outputs
-          - name: Copy linux arm64 build file to root
-            run: cp linux_arm64_outputs/* .
-
-          - name: Sign APK
-            id: sign_app
-            uses: filippoLeporati93/android-release-signer@v1
-            with:
-              releaseDirectory: build/unsigned
-              signingKeyBase64: ${{ secrets.SIGNING_KEY_BASE64 }}
-              alias: ${{ secrets.KEY_ALIAS }}
-              keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
-            env:
-              BUILD_TOOLS_VERSION: "34.0.0"
-
-          - name: Copy Signed android build file
-            run: cp ${{steps.sign_app.outputs.signedReleaseFile}} build/signed/Monogatari_android_${{ env.tag }}.apk
-
-          - name: Create release
-            uses: softprops/action-gh-release@v2
-            with:
-              files: |
-                build/signed/*.apk
-                Monogatari_windows_*.zip
-                Monogatari_windows_*.msix
-                Monogatari_macos_*.dmg
-                Monogatari_ios_*.ipa
-                Monogatari_linux_*.tar.gz
-                Monogatari_linux_*.deb
+  publish:
+    name: Publish complete GitHub release
+    needs: [android, windows, ios]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: monogatari-release-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Monogatari-*-release*
+          merge-multiple: true
+          path: dist
+      - name: Validate complete release and generate checksums
+        run: |
+          test -s dist/Monogatari-Android-arm64.apk
+          test -s dist/Monogatari-Android-armv7.apk
+          test -s dist/Monogatari-Android-x64.apk
+          test -s dist/Monogatari-Android.aab
+          test -s dist/Monogatari-Windows-x64.zip
+          test -s dist/Monogatari-iOS-unsigned.ipa
+          (cd dist && sha256sum *.apk *.aab *.zip *.ipa > SHA256SUMS.txt)
+      - name: Publish after all three builds succeed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          VERSION=$(sed -n 's/^version: \([^+]*\).*/\1/p' pubspec.yaml)
+          TAG="monogatari-v$VERSION"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            test "${GITHUB_REF#refs/tags/}" = "$TAG" || { echo 'The pushed tag must match the pubspec.yaml version.'; exit 1; }
+          fi
+          if TAG_SHA=$(gh api "repos/$GH_REPO/commits/$TAG" --jq '.sha' 2>/dev/null); then
+            test "$TAG_SHA" = "$GITHUB_SHA" || { echo 'This tag belongs to another commit; increment pubspec.yaml.'; exit 1; }
+          fi
+          if gh release view "$TAG" --json isDraft --jq '.isDraft' > "$RUNNER_TEMP/release-draft" 2>/dev/null; then
+            RELEASE_TARGET=$(gh api "repos/$GH_REPO/releases/tags/$TAG" --jq '.target_commitish')
+            TARGET_SHA=$(gh api "repos/$GH_REPO/commits/$RELEASE_TARGET" --jq '.sha')
+            test "$TARGET_SHA" = "$GITHUB_SHA" || { echo 'This release belongs to another commit; increment pubspec.yaml.'; exit 1; }
+            if [ "$(cat "$RUNNER_TEMP/release-draft")" = false ]; then
+              echo 'This exact release was already published.'
+              exit 0
+            fi
+          else
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "物语 $VERSION" --notes-file docs/release-notes.md
+          fi
+          gh release upload "$TAG" dist/*.apk dist/*.aab dist/*.zip dist/*.ipa dist/SHA256SUMS.txt --clobber
+          gh api "repos/$GH_REPO/releases/tags/$TAG" > "$RUNNER_TEMP/release-metadata.json"
+          python3 tool/verify_release_assets.py dist "$RUNNER_TEMP/release-metadata.json"
+          MAKE_LATEST=true
+          if LATEST_TAG=$(gh api "repos/$GH_REPO/releases/latest" --jq '.tag_name' 2>/dev/null); then
+            LATEST_VERSION=${LATEST_TAG#monogatari-v}
+            LATEST_VERSION=${LATEST_VERSION#v}
+            NEWEST_VERSION=$(printf '%s\n%s\n' "$LATEST_VERSION" "$VERSION" | sort -V | tail -n 1)
+            if [ "$NEWEST_VERSION" != "$VERSION" ]; then MAKE_LATEST=false; fi
+          fi
+          gh release edit "$TAG" --draft=false "--latest=$MAKE_LATEST"

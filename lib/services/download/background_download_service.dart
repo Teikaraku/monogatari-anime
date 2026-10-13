@@ -86,18 +86,21 @@ class BackgroundDownloadService {
           final granted = await requestNotificationPermission();
           if (!granted) {
             KazumiLogger().w(
-                'BackgroundDownloadService: notification permission denied by user');
+              'BackgroundDownloadService: notification permission denied by user',
+            );
           }
         } else {
-          KazumiLogger()
-              .i('BackgroundDownloadService: user declined permission dialog');
+          KazumiLogger().i(
+            'BackgroundDownloadService: user declined permission dialog',
+          );
         }
       } else {
         // 没有设置回调，直接请求权限（兼容旧行为）
         final granted = await requestNotificationPermission();
         if (!granted) {
-          KazumiLogger()
-              .w('BackgroundDownloadService: notification permission denied');
+          KazumiLogger().w(
+            'BackgroundDownloadService: notification permission denied',
+          );
         }
       }
     }
@@ -121,12 +124,15 @@ class BackgroundDownloadService {
         KazumiLogger().i('BackgroundDownloadService: service started');
       } else {
         KazumiLogger().w(
-            'BackgroundDownloadService: service start returned non-success: $result');
+          'BackgroundDownloadService: service start returned non-success: $result',
+        );
       }
       return _isRunning;
     } catch (e) {
-      KazumiLogger()
-          .e('BackgroundDownloadService: failed to start service', error: e);
+      KazumiLogger().e(
+        'BackgroundDownloadService: failed to start service',
+        error: e,
+      );
       return false;
     }
   }
@@ -139,8 +145,10 @@ class BackgroundDownloadService {
       _isRunning = false;
       KazumiLogger().i('BackgroundDownloadService: service stopped');
     } catch (e) {
-      KazumiLogger()
-          .e('BackgroundDownloadService: failed to stop service', error: e);
+      KazumiLogger().e(
+        'BackgroundDownloadService: failed to stop service',
+        error: e,
+      );
     }
   }
 
@@ -225,8 +233,10 @@ class _DownloadTaskHandler extends TaskHandler {
   @override
   void onNotificationButtonPressed(String id) {
     debugPrint('BackgroundDownloadService: notification button pressed: $id');
-    FlutterForegroundTask.sendDataToMain(
-        {'action': 'button_pressed', 'id': id});
+    FlutterForegroundTask.sendDataToMain({
+      'action': 'button_pressed',
+      'id': id,
+    });
   }
 
   @override
@@ -243,7 +253,8 @@ class _DownloadTaskHandler extends TaskHandler {
   @override
   Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {
     debugPrint(
-        'BackgroundDownloadService: task handler destroyed (isTimeout: $isTimeout)');
+      'BackgroundDownloadService: task handler destroyed (isTimeout: $isTimeout)',
+    );
   }
 
   @override

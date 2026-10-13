@@ -1,4 +1,6 @@
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
+import 'package:kazumi/modules/bangumi/broadcast_slot.dart';
+import 'package:kazumi/request/apis/airtime_api.dart';
 import 'package:kazumi/request/apis/bangumi_api.dart';
 import 'package:kazumi/utils/anime_season.dart';
 import 'package:kazumi/repositories/collect_repository.dart';
@@ -8,7 +10,7 @@ import 'package:mobx/mobx.dart';
 
 part 'timeline_controller.g.dart';
 
-enum TimelineSort { popularity, rating, defaultOrder }
+enum TimelineSort { airTime, popularity, rating, defaultOrder }
 
 class TimelineController = _TimelineController with _$TimelineController;
 
@@ -43,23 +45,36 @@ abstract class _TimelineController with Store {
       _collectRepository.getTimelineOnlyShowWatchingBangumis();
 
   @readonly
-  TimelineSort _sort = TimelineSort.popularity;
+  TimelineSort _sort = TimelineSort.airTime;
+
+  /// Broadcast times by subject id; empty until loaded or when unavailable.
+  Map<int, BroadcastSlot> airtimes = const {};
+
+  Future<void> _loadAirtimes() async {
+    try {
+      airtimes = await AirtimeApi.load();
+    } catch (error) {
+      KazumiLogger().w('Timeline: broadcast times unavailable', error: error);
+    }
+  }
 
   @action
   Future<void> loadSeason(DateTime date) async {
     if (isLoading) return;
     isLoading = true;
     isTimeOut = false;
+    final airtimesLoaded = _loadAirtimes();
     try {
       _selectedDate = date;
       bangumiCalendar.clear();
-      if (isSameSeason(date, DateTime.now())) {
-        bangumiCalendar.addAll(await BangumiApi.getCalendar());
-        isTimeOut = bangumiCalendar.isEmpty;
-      } else {
-        await _getSchedulesBySeason(date);
-        isTimeOut = bangumiCalendar.every((day) => day.isEmpty);
-      }
+      final calendar = isSameSeason(date, DateTime.now())
+          ? await BangumiApi.getCalendar()
+          : await BangumiApi.getSeasonCalendar(
+              AnimeSeason(date).toSeasonStartAndEnd());
+      // Show the day lists once, already in broadcast order.
+      await airtimesLoaded;
+      bangumiCalendar.addAll(_byBroadcastDay(calendar));
+      isTimeOut = bangumiCalendar.every((day) => day.isEmpty);
       if (!isTimeOut) changeSort(_sort);
     } catch (error, stackTrace) {
       isTimeOut = true;
@@ -70,39 +85,55 @@ abstract class _TimelineController with Store {
     }
   }
 
-  // MobX batches clear/addAll between awaits so observers never see a partial update.
-  @action
-  Future<void> _getSchedulesBySeason(DateTime date) async {
-    final dateRange = AnimeSeason(date).toSeasonStartAndEnd();
-    const pageCount = 4;
-    const limit = 20;
-    final resBangumiCalendar = List.generate(7, (_) => <BangumiItem>[]);
-    for (var page = 0; page < pageCount; page++) {
-      final newList =
-          await BangumiApi.getCalendarBySearch(dateRange, limit, page * limit);
-      for (int i = 0; i < resBangumiCalendar.length; ++i) {
-        resBangumiCalendar[i].addAll(newList[i]);
+  /// Bangumi groups shows by their Japanese broadcast day. Shows with a known
+  /// time move to the day they air in the device's time zone, so a 00:30 JST
+  /// show sits on the previous evening in Beijing. The first broadcast decides
+  /// the day even when bangumi-data has no repeat period: the timetable only
+  /// lists series.
+  List<List<BangumiItem>> _byBroadcastDay(List<List<BangumiItem>> days) {
+    final result = List.generate(7, (_) => <BangumiItem>[]);
+    final placed = <int>{};
+    for (var day = 0; day < days.length && day < 7; day++) {
+      for (final item in days[day]) {
+        if (!placed.add(item.id)) continue;
+        final slot = airtimes[item.id];
+        result[slot != null ? slot.localWeekday - 1 : day].add(item);
       }
-      bangumiCalendar.clear();
-      bangumiCalendar.addAll(resBangumiCalendar);
     }
+    return result;
   }
 
   @action
   void changeSort(TimelineSort sort) {
     _sort = sort;
-    final Comparator<BangumiItem> compare = switch (sort) {
-      TimelineSort.popularity => (a, b) => b.votes.compareTo(a.votes),
-      TimelineSort.rating => (a, b) => b.ratingScore.compareTo(a.ratingScore),
-      TimelineSort.defaultOrder => (a, b) => a.id.compareTo(b.id),
-    };
     final resBangumiCalendar = bangumiCalendar.toList();
-    for (final dayList in resBangumiCalendar) {
-      dayList.sort(compare);
+    for (var day = 0; day < resBangumiCalendar.length; day++) {
+      resBangumiCalendar[day].sort(switch (sort) {
+        TimelineSort.airTime => _byAirtime(day + 1),
+        TimelineSort.popularity => (a, b) => b.votes.compareTo(a.votes),
+        TimelineSort.rating => (a, b) => b.ratingScore.compareTo(a.ratingScore),
+        TimelineSort.defaultOrder => (a, b) => a.id.compareTo(b.id),
+      });
     }
     bangumiCalendar.clear();
     bangumiCalendar.addAll(resBangumiCalendar);
   }
+
+  /// Earliest broadcast first in the column of ISO [weekday]; subjects without
+  /// a known time follow, by popularity.
+  Comparator<BangumiItem> _byAirtime(int weekday) => (a, b) {
+        final slotA = airtimes[a.id];
+        final slotB = airtimes[b.id];
+        if (slotA == null || slotB == null) {
+          if (slotA != null) return -1;
+          if (slotB != null) return 1;
+          return b.votes.compareTo(a.votes);
+        }
+        final byTime = slotA
+            .minuteInColumn(weekday)
+            .compareTo(slotB.minuteInColumn(weekday));
+        return byTime != 0 ? byTime : b.votes.compareTo(a.votes);
+      };
 
   @action
   Future<void> setNotShowAbandonedBangumis(bool value) async {

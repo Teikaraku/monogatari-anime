@@ -4,6 +4,7 @@ const _timelineOptionsTitle = '排序与筛选';
 
 extension _TimelineSortLabel on TimelineSort {
   String get label => switch (this) {
+        TimelineSort.airTime => '播出时间',
         TimelineSort.popularity => '热度优先',
         TimelineSort.rating => '评分优先',
         TimelineSort.defaultOrder => '默认顺序',

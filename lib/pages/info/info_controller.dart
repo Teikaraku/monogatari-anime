@@ -1,9 +1,11 @@
 import 'package:kazumi/bean/dialog/dialog_helper.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/modules/bangumi/bangumi_relation.dart';
+import 'package:kazumi/modules/bangumi/bangumi_subject_detail.dart';
+import 'package:kazumi/modules/bangumi/episode_item.dart';
 import 'package:kazumi/pages/collect/collect_controller.dart';
-import 'package:kazumi/modules/search/plugin_search_module.dart';
 import 'package:kazumi/request/apis/bangumi_api.dart';
+import 'package:kazumi/request/apis/main_episode_cache.dart';
 import 'package:mobx/mobx.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/modules/characters/character_item.dart';
@@ -21,12 +23,6 @@ abstract class _InfoController with Store {
 
   @observable
   bool isLoading = false;
-
-  @observable
-  var pluginSearchResponseList = ObservableList<PluginSearchResponse>();
-
-  @observable
-  var pluginSearchStatus = ObservableMap<String, PluginSearchStatus>();
 
   @observable
   var characterList = ObservableList<CharacterItem>();
@@ -48,27 +44,32 @@ abstract class _InfoController with Store {
 
   int _relationRequestGeneration = 0;
 
-  Future<void> queryBangumiInfoByID(int id, {String type = "init"}) async {
+  /// Returns the detail-page fields, or null when the request failed.
+  Future<BangumiSubjectDetail?> queryBangumiInfoByID(int id,
+      {String type = "init"}) async {
     isLoading = true;
     try {
-      await _updateBangumiInfoByID(id, type: type);
+      return await _updateBangumiInfoByID(id, type: type);
     } finally {
       isLoading = false;
     }
   }
 
-  Future<void> refreshBangumiInfoByID(int id) async {
-    await _updateBangumiInfoByID(id, type: "update");
-  }
+  Future<BangumiSubjectDetail?> refreshBangumiInfoByID(int id) =>
+      _updateBangumiInfoByID(id, type: "update");
 
-  Future<void> _updateBangumiInfoByID(int id, {required String type}) async {
-    final value = await BangumiApi.getBangumiInfoByID(id);
-    if (value == null) {
-      return;
+  Future<BangumiSubjectDetail?> _updateBangumiInfoByID(int id,
+      {required String type}) async {
+    final result = await BangumiApi.getBangumiSubjectByID(id);
+    if (result == null) {
+      return null;
     }
+    final (value, detail) = result;
     if (type == "init") {
       bangumiItem = value;
     } else {
+      // The detail page of another subject may have taken over meanwhile.
+      if (bangumiItem.id != id) return detail;
       bangumiItem.summary = value.summary;
       bangumiItem.tags = value.tags;
       bangumiItem.rank = value.rank;
@@ -80,7 +81,12 @@ abstract class _InfoController with Store {
       bangumiItem.votesCount = value.votesCount;
     }
     await collectController.updateLocalCollect(bangumiItem);
+    return detail;
   }
+
+  /// Main episodes for the progress card; throws when the request fails.
+  Future<List<EpisodeInfo>> queryBangumiMainEpisodesByID(int id) =>
+      MainEpisodeCache.get(id);
 
   Future<void> queryBangumiCharactersByID(int id) async {
     characterList.clear();

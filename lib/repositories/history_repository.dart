@@ -7,13 +7,14 @@ import 'package:kazumi/services/sync/history_sync_service.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/services/storage/history_storage_coordinator.dart';
 
-typedef HistoryProgressSyncAppender = Future<void> Function({
-  required History history,
-  required int episode,
-  required int road,
-  required int progressMs,
-  required int updatedAt,
-});
+typedef HistoryProgressSyncAppender =
+    Future<void> Function({
+      required History history,
+      required int episode,
+      required int road,
+      required int progressMs,
+      required int updatedAt,
+    });
 
 typedef HistoryDeleteSyncAppender = Future<void> Function(History history);
 
@@ -100,12 +101,13 @@ class HistoryRepository implements IHistoryRepository {
     HistoryProgressSyncAppender? progressSyncAppender,
     HistoryDeleteSyncAppender? deleteSyncAppender,
     HistoryClearSyncAppender? clearSyncAppender,
-  })  : _historiesBox = historiesBox ?? GStorage.histories,
-        _privateModeReader = privateModeReader ??
-            (() => GStorage.getSetting(SettingsKeys.privateMode)),
-        _progressSyncAppender = progressSyncAppender ?? _appendProgressSync,
-        _deleteSyncAppender = deleteSyncAppender ?? _appendDeleteSync,
-        _clearSyncAppender = clearSyncAppender ?? _appendClearSync;
+  }) : _historiesBox = historiesBox ?? GStorage.histories,
+       _privateModeReader =
+           privateModeReader ??
+           (() => GStorage.getSetting(SettingsKeys.privateMode)),
+       _progressSyncAppender = progressSyncAppender ?? _appendProgressSync,
+       _deleteSyncAppender = deleteSyncAppender ?? _appendDeleteSync,
+       _clearSyncAppender = clearSyncAppender ?? _appendClearSync;
 
   final Box<History> _historiesBox;
   final bool Function() _privateModeReader;
@@ -228,14 +230,11 @@ class HistoryRepository implements IHistoryRepository {
         final legacyKey = History.legacyKey(adapterName, bangumiItem);
         final shouldMigrateLegacy =
             HistoryEntryKind.normalize(identity.entryKind) ==
-                HistoryEntryKind.online;
+            HistoryEntryKind.online;
 
         // 获取或创建历史记录
-        var history = _findHistory(
-              adapterName,
-              bangumiItem,
-              identity.entryKind,
-            ) ??
+        var history =
+            _findHistory(adapterName, bangumiItem, identity.entryKind) ??
             History(
               bangumiItem,
               episode,
@@ -263,17 +262,50 @@ class HistoryRepository implements IHistoryRepository {
 
         // 更新观看进度
         var prog = history.progresses[episode];
+        if (identity.episodePageUrl.startsWith('monogatari://episode/')) {
+          // Source catalogs can arrive in a different order on the next run.
+          // A list slot is not an episode identity, so retain displaced
+          // progress and move an existing matching identity into this slot.
+          MapEntry<int, Progress>? matching;
+          for (final entry in history.progresses.entries) {
+            if (entry.value.episodePageUrl == identity.episodePageUrl) {
+              matching = entry;
+              break;
+            }
+          }
+          if (prog != null &&
+              prog.episodePageUrl.startsWith('monogatari://episode/') &&
+              prog.episodePageUrl != identity.episodePageUrl) {
+            var spareSlot = episode + 1;
+            while (history.progresses.containsKey(spareSlot)) {
+              spareSlot++;
+            }
+            prog.episode = spareSlot;
+            history.progresses[spareSlot] = prog;
+            history.progresses.remove(episode);
+            prog = null;
+          }
+          if (matching != null) {
+            history.progresses.remove(matching.key);
+            prog = matching.value..episode = episode;
+            history.progresses[episode] = prog;
+          }
+        }
         if (prog == null) {
           history.progresses[episode] = Progress(
             episode,
             identity.road,
             progress.inMilliseconds,
             updatedAtMs: nowMs,
+            episodePageUrl: identity.episodePageUrl,
           );
         } else {
           prog.road = identity.road;
           prog.progress = progress;
           prog.updatedAtMs = nowMs;
+          if (identity.episodePageUrl.isNotEmpty) {
+            prog.episodePageUrl = identity.episodePageUrl;
+          }
         }
 
         // 保存到存储

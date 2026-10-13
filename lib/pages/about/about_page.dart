@@ -25,35 +25,19 @@ class AboutPage extends StatelessWidget {
                   children: const [
                     AboutLinkTile(
                       icon: Icons.code_rounded,
-                      title: '上游源代码',
+                      title: '源代码',
                       url: ApiEndpoints.sourceUrl,
                     ),
                     AboutLinkTile(
-                      icon: Icons.language_rounded,
-                      title: '上游项目主页',
-                      url: ApiEndpoints.projectUrl,
-                    ),
-                    AboutLinkTile(
                       icon: Icons.bug_report_rounded,
-                      title: '上游问题反馈',
+                      title: '问题反馈',
                       url: '${ApiEndpoints.sourceUrl}/issues',
-                    ),
-                    AboutLinkTile(
-                      icon: Icons.forum_rounded,
-                      title: 'Telegram',
-                      url: ApiEndpoints.telegramGroup,
                     ),
                   ],
                 ),
                 ContentSection.group(
                   title: '开源',
                   children: [
-                    const AboutLinkTile(
-                      icon: Icons.handshake_outlined,
-                      title: '贡献指南',
-                      url:
-                          '${ApiEndpoints.sourceUrl}/blob/main/static/doc/CONTRIBUTING.md',
-                    ),
                     const AboutLinkTile.route(
                       icon: Icons.favorite_outline_rounded,
                       title: '致谢',
@@ -143,7 +127,7 @@ class _ProjectHeader extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           Text(
-            '基于自定义规则的开源番剧应用',
+            '开源番剧应用',
             style: theme.textTheme.bodyLarge,
           ),
           const SizedBox(height: 20),

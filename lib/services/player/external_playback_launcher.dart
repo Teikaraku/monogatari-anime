@@ -57,7 +57,7 @@ class ExternalPlaybackLauncher {
         );
       } else {
         KazumiDialog.showToast(
-          message: '暂不支持该规则',
+          message: '当前资源暂不支持使用外部播放器',
         );
       }
     }

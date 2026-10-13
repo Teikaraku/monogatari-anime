@@ -56,9 +56,9 @@ class _MyPageState extends State<MyPage> {
         MyDestination.theme => '/settings/theme',
         MyDestination.player => '/settings/player',
         MyDestination.danmaku => '/settings/danmaku/',
-        MyDestination.rules => '/settings/plugin/',
         MyDestination.history => '/settings/history/',
         MyDestination.downloads => '/settings/download/',
+        MyDestination.stats => '/settings/history/stats',
         MyDestination.sync => '/settings/sync',
         MyDestination.storage => '/settings/storage',
         MyDestination.about => '/settings/about/',
@@ -75,19 +75,15 @@ class _MyPageState extends State<MyPage> {
         backgroundColor: background,
         contentWidth: MySpaceView.contentWidthFor,
         actions: [
-          MySettingsButton(
-            onTap: () => context.pushNamed('/settings/'),
-          ),
+          MySettingsButton(onTap: () => context.pushNamed('/settings/')),
         ],
       ),
       body: SafeArea(
         top: false,
         bottom: false,
         child: Observer(
-          builder: (context) => MySpaceView(
-            stats: widget.controller.watchStats,
-            onOpen: _open,
-          ),
+          builder: (context) =>
+              MySpaceView(stats: widget.controller.watchStats, onOpen: _open),
         ),
       ),
     );

@@ -13,8 +13,6 @@ class UpdateSettingsPage extends StatefulWidget {
 
 class _UpdateSettingsPageState extends State<UpdateSettingsPage> {
   bool _autoUpdate = GStorage.getSetting(SettingsKeys.autoUpdate);
-  bool _pluginUpdate =
-      GStorage.getSetting(SettingsKeys.checkPluginUpdateOnStartup);
 
   @override
   Widget build(BuildContext context) => SettingsDetailScaffold(
@@ -31,18 +29,6 @@ class _UpdateSettingsPageState extends State<UpdateSettingsPage> {
                   onToggle: (value) {
                     setState(() => _autoUpdate = value ?? !_autoUpdate);
                     GStorage.putSetting(SettingsKeys.autoUpdate, _autoUpdate);
-                  },
-                ),
-                SettingsTile.switchTile(
-                  leading: Icons.extension_rounded,
-                  title: const Text('规则更新'),
-                  initialValue: _pluginUpdate,
-                  onToggle: (value) {
-                    setState(() => _pluginUpdate = value ?? !_pluginUpdate);
-                    GStorage.putSetting(
-                      SettingsKeys.checkPluginUpdateOnStartup,
-                      _pluginUpdate,
-                    );
                   },
                 ),
               ],

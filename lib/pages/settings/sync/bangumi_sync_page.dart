@@ -156,6 +156,8 @@ class _BangumiSyncPageState extends State<BangumiSyncPage> {
               GStorage.getSetting(SettingsKeys.bangumiSyncPriority));
           final showToast =
               GStorage.getSetting(SettingsKeys.bangumiImmediateSyncToastEnable);
+          final episodeSync =
+              GStorage.getSetting(SettingsKeys.bangumiEpisodeSyncEnable);
           final message =
               _message ?? (_tokenError == null ? _bangumi.lastError : null);
           return PopScope(
@@ -228,6 +230,20 @@ class _BangumiSyncPageState extends State<BangumiSyncPage> {
                           ),
                         ),
                         const Divider(indent: 16, endIndent: 16),
+                        SwitchListTile(
+                          title: const Text('同步观看进度'),
+                          subtitle: const Text('看完一集后，在 Bangumi 标为看过'),
+                          value: episodeSync,
+                          onChanged: _busy
+                              ? null
+                              : (value) async {
+                                  await GStorage.putSetting(
+                                    SettingsKeys.bangumiEpisodeSyncEnable,
+                                    value,
+                                  );
+                                  if (mounted) setState(() {});
+                                },
+                        ),
                         SwitchListTile(
                           title: const Text('同步结果提示'),
                           subtitle: const Text('修改追番状态后显示同步结果'),

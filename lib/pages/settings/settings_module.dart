@@ -5,7 +5,6 @@ import 'package:kazumi/pages/about/about_module.dart';
 import 'package:kazumi/pages/download/download_page_module.dart';
 import 'package:kazumi/pages/history/history_module.dart';
 import 'package:kazumi/pages/logs/logs_page.dart';
-import 'package:kazumi/pages/plugin_editor/plugin_module.dart';
 import 'package:kazumi/pages/settings/danmaku/danmaku_module.dart';
 import 'package:kazumi/pages/settings/decoder_settings.dart';
 import 'package:kazumi/pages/settings/displaymode_settings.dart';
@@ -82,7 +81,6 @@ final settingsModule = createModule(
             child: (context, state) => const SuperResolutionSettings(),
           )
           ..module(aboutModule)
-          ..module(pluginModule)
           ..module(danmakuModule)
           ..route(
             '/download-settings',

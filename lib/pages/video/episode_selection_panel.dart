@@ -55,6 +55,15 @@ class EpisodeSelectionPanelState extends State<EpisodeSelectionPanel> {
   double get _toolbarHeight =>
       math.max(56, MediaQuery.textScalerOf(context).scale(20) + 8);
 
+  @override
+  void didUpdateWidget(covariant EpisodeSelectionPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.isOffline) {
+      // An automatic source change also changes the visible episode list.
+      _visibleRoad = widget.selectedRoad;
+    }
+  }
+
   void _selectRoad(int road) {
     if (_visibleRoad == road) return;
     setState(() => _visibleRoad = road);
@@ -133,14 +142,15 @@ class EpisodeSelectionPanelState extends State<EpisodeSelectionPanel> {
                           ),
                         ),
                       ),
-                      const SizedBox(height: 16),
-                      _RoadSelector(
-                        roads: widget.roads,
-                        visibleRoad: _visibleRoad,
-                        isOffline: widget.isOffline,
-                        onChanged: _selectRoad,
-                        disableAnimations: widget.disableAnimations,
-                      ),
+                      if (widget.isOffline) ...[
+                        const SizedBox(height: 16),
+                        _RoadSelector(
+                          roads: widget.roads,
+                          visibleRoad: _visibleRoad,
+                          onChanged: _selectRoad,
+                          disableAnimations: widget.disableAnimations,
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -192,7 +202,7 @@ class EpisodeSelectionPanelState extends State<EpisodeSelectionPanel> {
                   hasScrollBody: false,
                   child: GeneralEmptyState(
                     icon: Icons.video_library_outlined,
-                    title: '这条线路暂无剧集',
+                    title: '暂无可播放剧集',
                   ),
                 )
               else
@@ -270,14 +280,12 @@ class _RoadSelector extends StatefulWidget {
   const _RoadSelector({
     required this.roads,
     required this.visibleRoad,
-    required this.isOffline,
     required this.onChanged,
     required this.disableAnimations,
   });
 
   final List<Road> roads;
   final int visibleRoad;
-  final bool isOffline;
   final ValueChanged<int> onChanged;
   final bool disableAnimations;
 
@@ -292,9 +300,9 @@ class _RoadSelectorState extends State<_RoadSelector> {
 
   String _name(int index) => index >= 0 && index < widget.roads.length
       ? (widget.roads[index].name.trim().isEmpty
-          ? '播放线路 ${index + 1}'
+          ? '缓存列表 ${index + 1}'
           : widget.roads[index].name)
-      : '暂无线路';
+      : '暂无缓存';
 
   void _toggleMenu(MenuController controller) {
     final pointerActivation = _pointerActivation;
@@ -430,7 +438,7 @@ class _RoadSelectorState extends State<_RoadSelector> {
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 6),
             child: Text(
-              '选择播放线路',
+              '选择缓存列表',
               style: theme.textTheme.bodySmall?.copyWith(
                 fontSize: 12,
                 color: colors.onSurfaceVariant,
@@ -446,7 +454,7 @@ class _RoadSelectorState extends State<_RoadSelector> {
           return Semantics(
             button: canSwitch,
             expanded: canSwitch ? open : null,
-            label: canSwitch ? '切换播放线路' : null,
+            label: canSwitch ? '切换缓存列表' : null,
             child: Material(
               animationDuration: duration,
               color: open
@@ -469,7 +477,7 @@ class _RoadSelectorState extends State<_RoadSelector> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              widget.isOffline ? '离线观看' : '播放线路',
+                              '离线观看',
                               style: theme.textTheme.bodySmall?.copyWith(
                                   fontSize: 12,
                                   color: colors.onSurfaceVariant),

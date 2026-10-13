@@ -365,7 +365,7 @@ class _PlayerSettingsPageState extends State<PlayerSettingsPage> {
                   setState(() {});
                 },
                 title: Text('广告过滤'),
-                description: Text('强制启用HLS广告过滤，忽略规则设置'),
+                description: Text('过滤 HLS 播放列表中识别到的插播片段'),
                 initialValue: forceAdBlocker,
               ),
               SettingsTile.switchTile(

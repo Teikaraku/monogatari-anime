@@ -8,13 +8,28 @@ class _CollectPosterCard extends StatelessWidget {
     required this.showStatus,
     required this.onOpen,
     required this.onChangeType,
+    this.progress,
+    this.onResume,
   });
 
   final CollectedBangumi entry;
   final bool showRating;
   final bool showStatus;
+  final CollectProgress? progress;
   final VoidCallback onOpen;
   final ValueChanged<CollectType>? onChangeType;
+  final VoidCallback? onResume;
+
+  /// One short progress phrase for the narrow poster footer.
+  String? get _shortProgress {
+    final progress = this.progress;
+    if (progress == null) return null;
+    if (progress.hasUpdate) return '更新至 ${progress.latestAired} 话';
+    if (progress.watchedEpisode != null) {
+      return '看到 ${progress.watchedEpisode} 话';
+    }
+    return null;
+  }
 
   static const _coverRatio = 0.7;
   static bool _isCompact(double width) => width < 160;
@@ -64,6 +79,8 @@ class _CollectPosterCard extends StatelessWidget {
     final type = CollectType.fromValue(entry.type);
     final hasRating = showRating && item.ratingScore > 0;
     final showDetails = showStatus || showRating;
+    final shortProgress = _shortProgress;
+    final hasUpdate = progress?.hasUpdate ?? false;
 
     Widget detailLine(String value, {bool status = false}) => SizedBox(
           height: status ? _statusHeight(scaler) : _detailsHeight(scaler),
@@ -103,8 +120,8 @@ class _CollectPosterCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   if (showRating)
-                    detailLine(
-                        hasRating ? item.ratingScore.toStringAsFixed(1) : ''),
+                    detailLine(shortProgress ??
+                        (hasRating ? item.ratingScore.toStringAsFixed(1) : '')),
                   if (showStatus) ...[
                     if (showRating) const SizedBox(height: 2),
                     detailLine(type.label, status: true),
@@ -112,11 +129,18 @@ class _CollectPosterCard extends StatelessWidget {
                 ],
               )
             : detailLine([
-                if (hasRating) '${item.ratingScore.toStringAsFixed(1)} 分',
+                if (shortProgress != null)
+                  shortProgress
+                else if (hasRating)
+                  '${item.ratingScore.toStringAsFixed(1)} 分',
                 if (showStatus) type.label,
               ].join(' · ')),
       );
-      final menu = _CollectEntryMenu(entry: entry, onChanged: onChangeType);
+      final menu = _CollectEntryMenu(
+        entry: entry,
+        onChanged: onChangeType,
+        onResume: onResume,
+      );
       final footer = compact
           ? Padding(
               padding: const EdgeInsets.only(top: 8, bottom: 4),
@@ -187,6 +211,8 @@ class _CollectPosterCard extends StatelessWidget {
           label: [
             title,
             type.label,
+            if (hasUpdate) '有更新',
+            ?shortProgress,
             if (year != null) '$year 年',
             if (hasRating) '${item.ratingScore.toStringAsFixed(1)} 分',
           ].join('，'),
@@ -198,9 +224,20 @@ class _CollectPosterCard extends StatelessWidget {
                 ExcludeSemantics(
                   child: AspectRatio(
                     aspectRatio: _coverRatio,
-                    child: _CollectCover(
-                      item: item,
-                      borderRadius: BorderRadius.circular(8),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        _CollectCover(
+                          item: item,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        if (hasUpdate)
+                          const PositionedDirectional(
+                            top: 6,
+                            start: 6,
+                            child: _UpdateBadge(onCover: true),
+                          ),
+                      ],
                     ),
                   ),
                 ),
@@ -221,12 +258,16 @@ class _CollectListTile extends StatelessWidget {
     required this.showRating,
     required this.onOpen,
     required this.onChangeType,
+    this.progress,
+    this.onResume,
   });
 
   final CollectedBangumi entry;
   final bool showRating;
+  final CollectProgress? progress;
   final VoidCallback onOpen;
   final ValueChanged<CollectType>? onChangeType;
+  final VoidCallback? onResume;
 
   @override
   Widget build(BuildContext context) {
@@ -235,8 +276,14 @@ class _CollectListTile extends StatelessWidget {
     final item = entry.bangumiItem;
     final title = CollectLibraryQuery.titleOf(entry);
     final airDate = DateTime.tryParse(item.airDate);
+    final progressLabel = progress?.progressLabel ?? '';
+    final schedule = progress?.scheduleLabel;
+    final hasUpdate = progress?.hasUpdate ?? false;
     final metadata = [
-      if (airDate != null) '${airDate.year} 年',
+      if (schedule != null)
+        schedule
+      else if (airDate != null)
+        '${airDate.year} 年',
       if (showRating && item.ratingScore > 0)
         '${item.ratingScore.toStringAsFixed(1)} 分',
     ];
@@ -251,7 +298,12 @@ class _CollectListTile extends StatelessWidget {
           Positioned.fill(
             child: Semantics(
               button: true,
-              label: [title, ...metadata].join('，'),
+              label: [
+                title,
+                if (hasUpdate) '有更新',
+                if (progressLabel.isNotEmpty) progressLabel,
+                ...metadata,
+              ].join('，'),
               child: InkWell(onTap: onOpen),
             ),
           ),
@@ -298,11 +350,38 @@ class _CollectListTile extends StatelessWidget {
                                       height: 1.35,
                                     ),
                                   ),
+                                  if (progressLabel.isNotEmpty || hasUpdate)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 6),
+                                      child: Row(
+                                        children: [
+                                          if (hasUpdate) ...[
+                                            const _UpdateBadge(),
+                                            const SizedBox(width: 6),
+                                          ],
+                                          Flexible(
+                                            child: Text(
+                                              progressLabel,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: theme.textTheme.bodySmall
+                                                  ?.copyWith(
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w500,
+                                                color: colors.onSurface,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
                                   if (metadata.isNotEmpty)
                                     Padding(
                                       padding: const EdgeInsets.only(top: 6),
                                       child: Text(
                                         metadata.join(' · '),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
                                         style:
                                             theme.textTheme.bodySmall?.copyWith(
                                           fontSize: 12,
@@ -316,10 +395,35 @@ class _CollectListTile extends StatelessWidget {
                           ),
                         ),
                       ),
-                      _CollectEntryMenu(
-                        entry: entry,
-                        onChanged: onChangeType,
-                        showStatusLabel: true,
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        children: [
+                          _CollectEntryMenu(
+                            entry: entry,
+                            onChanged: onChangeType,
+                            showStatusLabel: true,
+                          ),
+                          if (onResume != null)
+                            TextButton.icon(
+                              onPressed: onResume,
+                              style: TextButton.styleFrom(
+                                backgroundColor: colors.primary,
+                                foregroundColor: colors.onPrimary,
+                                shape: const StadiumBorder(),
+                                visualDensity: VisualDensity.standard,
+                                tapTargetSize: MaterialTapTargetSize.padded,
+                                minimumSize: const Size(0, 32),
+                                padding: const EdgeInsetsDirectional.fromSTEB(
+                                    10, 0, 14, 0),
+                                textStyle: const TextStyle(
+                                    fontSize: 14, fontWeight: FontWeight.w600),
+                              ),
+                              icon: const Icon(Icons.play_arrow_rounded,
+                                  size: 18),
+                              label: const Text('继续看'),
+                            ),
+                        ],
                       ),
                     ],
                   ),
@@ -357,14 +461,48 @@ class _CollectCover extends StatelessWidget {
       );
 }
 
+class _UpdateBadge extends StatelessWidget {
+  const _UpdateBadge({this.onCover = false});
+
+  /// Solid on covers, where a tint would not read over artwork.
+  final bool onCover;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: onCover ? colors.primary : colors.primary.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(5),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+        child: Text(
+          onCover ? '更新' : '有更新',
+          style: TextStyle(
+            fontSize: 11,
+            height: 1.35,
+            fontWeight: FontWeight.w600,
+            color: onCover ? colors.onPrimary : colors.primary,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _CollectEntryMenu extends StatelessWidget {
   const _CollectEntryMenu({
     required this.entry,
     required this.onChanged,
+    this.onResume,
     this.showStatusLabel = false,
   });
   final CollectedBangumi entry;
   final ValueChanged<CollectType>? onChanged;
+
+  /// Offered first in the poster menu; the list tile has its own button.
+  final VoidCallback? onResume;
   final bool showStatusLabel;
 
   @override
@@ -373,8 +511,12 @@ class _CollectEntryMenu extends StatelessWidget {
     final type = CollectType.fromValue(entry.type);
     final title = CollectLibraryQuery.titleOf(entry);
     return KazumiMenuButton(
-      enabled: onChanged != null,
+      enabled: onChanged != null || onResume != null,
       menuChildren: [
+        if (onResume != null) ...[
+          KazumiMenuItem(onPressed: onResume, label: '继续看'),
+          const Divider(indent: 16, endIndent: 16),
+        ],
         for (final status
             in CollectType.values.where((type) => type.isCollected))
           KazumiMenuItem(

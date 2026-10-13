@@ -55,3 +55,10 @@ android/build/reports/problems/
 **/macos/Pods/
 **/ios/Podfile.lock
 **/macos/Podfile.lock
+
+# Private production signing material.
+/android/key.properties
+*.jks
+*.keystore
+*.p12
+/release-signing/

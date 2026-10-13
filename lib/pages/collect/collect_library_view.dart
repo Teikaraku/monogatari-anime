@@ -6,8 +6,10 @@ import 'package:kazumi/bean/widget/kazumi_menu.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/modules/collect/collect_layout.dart';
 import 'package:kazumi/modules/collect/collect_module.dart';
+import 'package:kazumi/modules/collect/collect_progress.dart';
 import 'package:kazumi/modules/collect/collect_type.dart';
 import 'package:kazumi/pages/collect/collect_library_query.dart';
+import 'package:kazumi/services/storage/storage.dart';
 import 'package:kazumi/utils/theme.dart';
 
 part 'collect_library_card.dart';
@@ -32,6 +34,8 @@ class CollectLibraryView extends StatefulWidget {
     required this.canEdit,
     required this.layout,
     required this.onLayoutChanged,
+    this.progress = const {},
+    this.onResume,
   });
 
   final List<CollectedBangumi> entries;
@@ -41,6 +45,12 @@ class CollectLibraryView extends StatefulWidget {
   final bool Function(BangumiItem) canEdit;
   final CollectLayout layout;
   final ValueChanged<CollectLayout> onLayoutChanged;
+
+  /// Watch and airing progress by subject id; missing for shows without any.
+  final Map<int, CollectProgress> progress;
+
+  /// Resumes the latest watch record of a show.
+  final ValueChanged<BangumiItem>? onResume;
 
   @override
   State<CollectLibraryView> createState() => _CollectLibraryViewState();
@@ -60,7 +70,8 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
   };
   PageStorageBucket _resultsStorage = PageStorageBucket();
   CollectType? _selectedType = CollectType.watching;
-  CollectSort _sort = CollectSort.recentlyChanged;
+  CollectSort _sort =
+      CollectSort.fromName(GStorage.getSetting(SettingsKeys.collectSort));
   String _query = '';
   bool _searchExpanded = false;
 
@@ -250,10 +261,13 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
             _CollectSortMenu(
               value: _sort,
               showLabel: !compact,
-              onChanged: (value) => setState(() {
-                _sort = value;
-                _resetResults();
-              }),
+              onChanged: (value) {
+                setState(() {
+                  _sort = value;
+                  _resetResults();
+                });
+                GStorage.putSetting(SettingsKeys.collectSort, value.name);
+              },
             ),
             if (compact)
               IconButton(
@@ -319,7 +333,10 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
   Widget _results(CollectLibraryQuery query, CollectType? type,
       {required double inset, Widget? header}) {
     return LayoutBuilder(builder: (context, constraints) {
-      final entries = query.results(type, _sort);
+      final entries = query.results(type, _sort, lastWatched: {
+        for (final MapEntry(:key, :value) in widget.progress.entries)
+          if (value.history != null) key: value.history!.lastWatchTime,
+      });
       final contentWidth = constraints.maxWidth - inset * 2;
       return ScrollbarTheme(
         data: ScrollbarTheme.of(context).copyWith(crossAxisMargin: 0),
@@ -374,8 +391,10 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
             key: ValueKey('collect-${entries[index].bangumiItem.id}'),
             entry: entries[index],
             showRating: widget.showRating,
+            progress: widget.progress[entries[index].bangumiItem.id],
             onOpen: () => widget.onOpen(entries[index].bangumiItem),
             onChangeType: _changeTypeFor(entries[index]),
+            onResume: _resumeFor(entries[index]),
           ),
         );
 
@@ -412,6 +431,14 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
           ? (type) => widget.onChangeType(entry.bangumiItem, type)
           : null;
 
+  VoidCallback? _resumeFor(CollectedBangumi entry) {
+    final onResume = widget.onResume;
+    final watched = widget.progress[entry.bangumiItem.id]?.history != null;
+    return onResume == null || !watched
+        ? null
+        : () => onResume(entry.bangumiItem);
+  }
+
   Widget _grid(List<CollectedBangumi> entries, double contentWidth,
       {required CollectType? type}) {
     final portrait = MediaQuery.orientationOf(context) == Orientation.portrait;
@@ -438,8 +465,10 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
         entry: entries[index],
         showRating: widget.showRating,
         showStatus: type == null,
+        progress: widget.progress[entries[index].bangumiItem.id],
         onOpen: () => widget.onOpen(entries[index].bangumiItem),
         onChangeType: _changeTypeFor(entries[index]),
+        onResume: _resumeFor(entries[index]),
       ),
     );
   }

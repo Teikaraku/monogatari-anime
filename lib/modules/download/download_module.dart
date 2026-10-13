@@ -1,4 +1,5 @@
 import 'package:hive_ce/hive.dart';
+import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 
 part 'download_module.g.dart';
 
@@ -22,6 +23,11 @@ class DownloadRecord {
   @HiveField(5)
   DateTime createdAt;
 
+  /// Keeps title aliases and season metadata for automatic source matching
+  /// when an interrupted download is resumed after restarting the app.
+  @HiveField(6)
+  BangumiItem? sourceSubject;
+
   String get key => '${pluginName}_$bangumiId';
 
   DownloadRecord(
@@ -30,8 +36,9 @@ class DownloadRecord {
     this.bangumiCover,
     this.pluginName,
     this.episodes,
-    this.createdAt,
-  );
+    this.createdAt, {
+    this.sourceSubject,
+  });
 }
 
 @HiveType(typeId: 8)
@@ -87,6 +94,29 @@ class DownloadEpisode {
   @HiveField(15, defaultValue: 0)
   int danDanBangumiID;
 
+  /// The API episode identifier is separate from the integer list position
+  /// used by older download records (e.g. a recap can be episode 12.5).
+  @HiveField(16)
+  double? apiEpisodeNumber;
+
+  @HiveField(17, defaultValue: '')
+  String apiEpisodeKey;
+
+  /// API downloads keep storage slots independent of episode numbering.
+  /// Unnumbered extras and fractional recap episodes do not have a reliable
+  /// integer DanDanPlay match. Legacy records retain their original order.
+  int? get danmakuQueryEpisodeNumber {
+    if (apiEpisodeKey.isEmpty) return episodeNumber;
+    final number = apiEpisodeNumber;
+    if (number == null ||
+        !number.isFinite ||
+        number <= 0 ||
+        number != number.truncateToDouble()) {
+      return null;
+    }
+    return number.toInt();
+  }
+
   DownloadEpisode(
     this.episodeNumber,
     this.episodeName,
@@ -104,6 +134,8 @@ class DownloadEpisode {
     this.episodePageUrl, {
     this.danmakuData = '',
     this.danDanBangumiID = 0,
+    this.apiEpisodeNumber,
+    this.apiEpisodeKey = '',
   });
 }
 

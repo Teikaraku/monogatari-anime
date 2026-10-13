@@ -139,14 +139,19 @@ abstract class _PlayerDanmakuController with Store {
   Future<DanmakuLoadResult> fetchDanmaku(
     int bangumiId,
     String pluginName,
-    int episode,
-  ) async {
+    int episode, {
+    int? cacheEpisode,
+  }) async {
     if (isLocalPlayback()) {
       return await _fetchCachedDanmaku(
         bangumiId,
         pluginName,
         episode,
+        cacheEpisode: cacheEpisode ?? episode,
       );
+    }
+    if (episode <= 0) {
+      return DanmakuLoadResult.success(danmakus: const [], bangumiID: bangumiID);
     }
     return await _fetchDanDanmakuByBgmBangumiID(
       bangumiId,
@@ -189,7 +194,8 @@ abstract class _PlayerDanmakuController with Store {
   }
 
   Future<DanmakuLoadResult> _fetchCachedDanmaku(
-      int bangumiId, String pluginName, int episode) async {
+      int bangumiId, String pluginName, int episode,
+      {required int cacheEpisode}) async {
     KazumiLogger().i(
         'PlayerController: attempting to load cached danmaku for episode $episode');
     var nextBangumiID = bangumiID;
@@ -197,7 +203,7 @@ abstract class _PlayerDanmakuController with Store {
       final cachedDanmakus = await downloadController.getCachedDanmakus(
         bangumiId,
         pluginName,
-        episode,
+        cacheEpisode,
       );
 
       if (cachedDanmakus != null && cachedDanmakus.isNotEmpty) {
@@ -208,6 +214,12 @@ abstract class _PlayerDanmakuController with Store {
           bangumiID: nextBangumiID,
         );
       } else {
+        if (episode <= 0) {
+          return DanmakuLoadResult.success(
+            danmakus: const [],
+            bangumiID: nextBangumiID,
+          );
+        }
         KazumiLogger()
             .i('PlayerController: no cached danmaku, attempting online fetch');
         try {
@@ -219,7 +231,7 @@ abstract class _PlayerDanmakuController with Store {
               KazumiLogger()
                   .i('PlayerController: fetched ${res.length} danmakus online');
               _saveDanmakuToCache(downloadController, bangumiId, pluginName,
-                  episode, res, nextBangumiID);
+                  cacheEpisode, res, nextBangumiID);
             }
             return DanmakuLoadResult.success(
               danmakus: res,

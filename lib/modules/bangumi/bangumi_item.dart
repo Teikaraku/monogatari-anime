@@ -123,7 +123,8 @@ class BangumiItem {
 
     final rawTags = json['tags'] as List? ?? [];
     final tagList = rawTags.map((tag) => BangumiTag.fromJson(tag)).toList();
-    final rawMetaTags = json['metaTags'];
+    // next.bgm.tv uses metaTags; api.bgm.tv search uses meta_tags.
+    final rawMetaTags = json['metaTags'] ?? json['meta_tags'];
     return BangumiItem(
       id: json['id'],
       type: json['type'] ?? 2,

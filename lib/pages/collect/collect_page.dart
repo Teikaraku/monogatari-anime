@@ -6,15 +6,27 @@ import 'package:flutter_modular/flutter_modular.dart';
 
 import 'package:kazumi/bean/appbar/sys_app_bar.dart';
 import 'package:kazumi/bean/dialog/dialog_helper.dart';
+import 'package:kazumi/modules/bangumi/airing_summary.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
+import 'package:kazumi/modules/bangumi/broadcast_slot.dart';
 import 'package:kazumi/modules/bangumi/sync_priority.dart';
 import 'package:kazumi/modules/collect/collect_layout.dart';
+import 'package:kazumi/modules/collect/collect_progress.dart';
 import 'package:kazumi/modules/collect/collect_sync_plan.dart';
 import 'package:kazumi/modules/collect/collect_type.dart';
+import 'package:kazumi/modules/history/history_module.dart';
 import 'package:kazumi/pages/collect/collect_controller.dart';
 import 'package:kazumi/pages/collect/collect_library_view.dart';
 import 'package:kazumi/pages/collect/collect_sync_dialog.dart';
+import 'package:kazumi/pages/history/history_controller.dart';
+import 'package:kazumi/request/apis/airtime_api.dart';
+import 'package:kazumi/request/apis/main_episode_cache.dart';
+import 'package:kazumi/services/logging/logger.dart';
+import 'package:kazumi/services/player/history_playback_service.dart';
+import 'package:kazumi/services/plugin/rule_engine_models.dart'
+    show RuleCancelToken;
 import 'package:kazumi/services/storage/storage.dart';
+import 'package:kazumi/utils/device.dart';
 
 class CollectPage extends StatefulWidget {
   const CollectPage({
@@ -29,10 +41,36 @@ class CollectPage extends StatefulWidget {
 }
 
 class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
+  static const _syncSettings = [
+    SettingsKeys.webDavEnable,
+    SettingsKeys.webDavEnableCollect,
+    SettingsKeys.bangumiSyncEnable,
+  ];
+
+  /// Episode lists requested at once for the airing progress.
+  static const _airingConcurrency = 3;
+
   CollectController get collectController => widget.controller;
+  final HistoryController _historyController = inject<HistoryController>();
+  final HistoryPlaybackService _playbackService =
+      inject<HistoryPlaybackService>();
   bool get _syncDialogOpen => dialogs.isRunning;
   final Set<int> _pendingIds = {};
   late CollectLayout _layout;
+  StreamSubscription<void>? _syncSettingsSubscription;
+
+  Map<int, BroadcastSlot> _airtimes = const {};
+  final Map<int, AiringSummary> _airing = {};
+  final Set<int> _airingRequested = {};
+  final List<int> _airingQueue = [];
+  int _airingRunning = 0;
+
+  CollectSyncPlan get _syncPlan => CollectSyncPlan(
+        webDavEnabled: GStorage.getSetting(SettingsKeys.webDavEnable),
+        webDavCollectiblesEnabled:
+            GStorage.getSetting(SettingsKeys.webDavEnableCollect),
+        bangumiEnabled: GStorage.getSetting(SettingsKeys.bangumiSyncEnable),
+      );
 
   Future<bool> _syncStep(
     CollectSyncStep step, {
@@ -55,20 +93,88 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
   @override
   void initState() {
     super.initState();
-    // Read once; page switches never change the saved default.
     _layout = CollectLayout.fromValue(
       GStorage.getSetting(SettingsKeys.defaultCollectLayout),
     );
     collectController.loadCollectibles();
+    _historyController.init();
+    _syncSettingsSubscription = GStorage.watchSettings(_syncSettings)
+        .listen((_) => mounted ? setState(() {}) : null);
+    AirtimeApi.load().then((airtimes) {
+      if (mounted) setState(() => _airtimes = airtimes);
+    }).catchError((Object e) {
+      KazumiLogger().w('Collect: broadcast times unavailable', error: e);
+    });
+  }
+
+  @override
+  void dispose() {
+    _syncSettingsSubscription?.cancel();
+    super.dispose();
   }
 
   void _changeLayout(CollectLayout layout) {
     if (_layout == layout) return;
     setState(() => _layout = layout);
+    GStorage.putSetting(SettingsKeys.defaultCollectLayout, layout.name);
   }
 
-  Future<void> _changeType(BangumiItem item, CollectType type) async {
+  /// Airing progress is fetched for shows being watched only.
+  void _requestAiring(Iterable<BangumiItem> items) {
+    for (final item in items) {
+      if (_airingRequested.add(item.id)) _airingQueue.add(item.id);
+    }
+    while (_airingRunning < _airingConcurrency && _airingQueue.isNotEmpty) {
+      _airingRunning++;
+      unawaited(_loadAiring(_airingQueue.removeAt(0)));
+    }
+  }
+
+  Future<void> _loadAiring(int id) async {
+    try {
+      final episodes = await MainEpisodeCache.get(id);
+      if (mounted && episodes.isNotEmpty) {
+        setState(() => _airing[id] =
+            AiringSummary.of(episodes, today: DateTime.now()));
+      }
+    } catch (e) {
+      // Retried the next time the page asks for it.
+      _airingRequested.remove(id);
+      KazumiLogger().w('Collect: episode list unavailable', error: e);
+    } finally {
+      _airingRunning--;
+      if (mounted) _requestAiring(const []);
+    }
+  }
+
+  Map<int, CollectProgress> _progress(List<History> histories) {
+    final latest = <int, History>{};
+    for (final history in histories) {
+      final id = history.bangumiItem.id;
+      final current = latest[id];
+      if (current == null ||
+          history.lastWatchTime.isAfter(current.lastWatchTime)) {
+        latest[id] = history;
+      }
+    }
+    final progress = <int, CollectProgress>{};
+    for (final entry in collectController.collectibles) {
+      final id = entry.bangumiItem.id;
+      final history = latest[id];
+      final airing = _airing[id];
+      final slot = _airtimes[id];
+      if (history != null || airing != null || slot != null) {
+        progress[id] =
+            CollectProgress(history: history, airing: airing, slot: slot);
+      }
+    }
+    return progress;
+  }
+
+  Future<void> _changeType(BangumiItem item, CollectType type,
+      {bool offerUndo = true}) async {
     if (_syncDialogOpen || _pendingIds.contains(item.id)) return;
+    final previous = CollectType.fromValue(collectController.getCollectType(item));
     setState(() => _pendingIds.add(item.id));
     try {
       await collectController.addCollect(item, type: type.value);
@@ -77,16 +183,54 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
     } finally {
       if (mounted) setState(() => _pendingIds.remove(item.id));
     }
+    final current = CollectType.fromValue(collectController.getCollectType(item));
+    // Bangumi may have refused, or a dialog may have been cancelled.
+    if (!offerUndo || current == previous || !mounted) return;
+    final title = item.nameCn.isNotEmpty ? item.nameCn : item.name;
+    KazumiDialog.showToast(
+      message: current.isCollected
+          ? '《$title》已改为「${current.label}」'
+          : '已取消收藏《$title》',
+      showActionButton: true,
+      actionLabel: '撤销',
+      duration: const Duration(seconds: 6),
+      onActionPressed: () => _changeType(item, previous, offerUndo: false),
+    );
+  }
+
+  Future<void> _resume(BangumiItem item) async {
+    if (_syncDialogOpen) return;
+    History? history;
+    for (final record in _historyController.histories) {
+      if (record.bangumiItem.id == item.id &&
+          (history == null ||
+              record.lastWatchTime.isAfter(history.lastWatchTime))) {
+        history = record;
+      }
+    }
+    if (history == null) return;
+    final record = history;
+    await dialogs.run((task) async {
+      final cancelToken = RuleCancelToken();
+      final result = await task.loading(
+        message: '获取中',
+        barrierDismissible: isDesktop(),
+        onCancel: cancelToken.cancel,
+        action: () => _playbackService.open(record, cancelToken: cancelToken),
+      );
+      switch (result) {
+        case HistoryPlaybackReady(:final args):
+          task.withContext(
+              (context) => context.pushNamed('/video/', arguments: args));
+        case HistoryPlaybackUnavailable(:final reason):
+          KazumiDialog.showToast(message: reason);
+      }
+    }, errorMessage: '暂时无法继续播放，请稍后重试');
   }
 
   Future<void> _sync() async {
     if (_syncDialogOpen || _pendingIds.isNotEmpty) return;
-    final plan = CollectSyncPlan(
-      webDavEnabled: GStorage.getSetting(SettingsKeys.webDavEnable),
-      webDavCollectiblesEnabled:
-          GStorage.getSetting(SettingsKeys.webDavEnableCollect),
-      bangumiEnabled: GStorage.getSetting(SettingsKeys.bangumiSyncEnable),
-    );
+    final plan = _syncPlan;
     await dialogs.run((task) async {
       final destination = await task.show<CollectSyncDestination>(
         builder: (_) => CollectSyncDialog(
@@ -117,27 +261,46 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
           return width - inset * 2 + 40;
         },
         actions: [
-          IconButton(
-            tooltip: '同步收藏',
-            onPressed: _syncDialogOpen || _pendingIds.isNotEmpty ? null : _sync,
-            icon: const Icon(Icons.sync_rounded),
-          ),
+          // Only offered once WebDAV or Bangumi sync is set up.
+          if (_syncPlan.canSync)
+            IconButton(
+              tooltip: '同步收藏',
+              onPressed:
+                  _syncDialogOpen || _pendingIds.isNotEmpty ? null : _sync,
+              icon: const Icon(Icons.sync_rounded),
+            ),
         ],
       ),
       body: SafeArea(
         top: false,
         bottom: false,
         child: Observer(
-          builder: (context) => CollectLibraryView(
-            entries: collectController.collectibles.toList(),
-            showRating: GStorage.getSetting(SettingsKeys.showRating),
-            layout: _layout,
-            onLayoutChanged: _changeLayout,
-            canEdit: (item) =>
-                !_syncDialogOpen && !_pendingIds.contains(item.id),
-            onOpen: (item) => context.pushNamed('/info/', arguments: item),
-            onChangeType: (item, type) => unawaited(_changeType(item, type)),
-          ),
+          builder: (context) {
+            final entries = collectController.collectibles.toList();
+            final progress =
+                _progress(_historyController.histories.toList());
+            final watching = [
+              for (final entry in entries)
+                if (entry.type == CollectType.watching.value) entry.bangumiItem,
+            ];
+            if (watching.any((item) => !_airingRequested.contains(item.id))) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) _requestAiring(watching);
+              });
+            }
+            return CollectLibraryView(
+              entries: entries,
+              showRating: GStorage.getSetting(SettingsKeys.showRating),
+              layout: _layout,
+              onLayoutChanged: _changeLayout,
+              progress: progress,
+              canEdit: (item) =>
+                  !_syncDialogOpen && !_pendingIds.contains(item.id),
+              onOpen: (item) => context.pushNamed('/info/', arguments: item),
+              onChangeType: (item, type) => unawaited(_changeType(item, type)),
+              onResume: (item) => unawaited(_resume(item)),
+            );
+          },
         ),
       ),
     );

@@ -1,7 +1,5 @@
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/modules/download/download_module.dart';
-import 'package:kazumi/modules/roads/road_module.dart';
-import 'package:kazumi/plugins/plugins.dart';
 
 /// Route arguments for '/video/'. Entry points hand playback context over
 /// through the route instead of pre-filling a shared controller, which lets
@@ -15,16 +13,17 @@ sealed class VideoPlaybackArgs {
 class OnlineVideoPlaybackArgs extends VideoPlaybackArgs {
   const OnlineVideoPlaybackArgs({
     required super.bangumiItem,
-    required this.plugin,
-    required this.title,
-    required this.src,
-    required this.roads,
+    this.initialEpisode,
+    this.initialOffset,
+    this.initialEpisodePageUrl,
   });
 
-  final Plugin plugin;
-  final String title;
-  final String src;
-  final List<Road> roads;
+  final int? initialEpisode;
+  final int? initialOffset;
+
+  /// Stable identity retained when a provider omits earlier episodes. Legacy
+  /// website URLs allow the player to fall back to the saved list position.
+  final String? initialEpisodePageUrl;
 }
 
 class OfflineVideoPlaybackArgs extends VideoPlaybackArgs {

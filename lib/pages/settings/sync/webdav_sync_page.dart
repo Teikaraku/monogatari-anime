@@ -154,7 +154,7 @@ class _WebDavSyncPageState extends State<WebDavSyncPage> {
                 SettingsTile.switchTile(
                   leading: Icons.filter_alt_rounded,
                   title: const Text('弹幕屏蔽词'),
-                  description: const Text('启动和修改规则后自动同步，包含关键词与正则表达式'),
+                  description: const Text('启动和修改屏蔽词后自动同步，包含关键词与正则表达式'),
                   initialValue: shield,
                   enabled: enabled && !_busy,
                   onToggle: (value) async {

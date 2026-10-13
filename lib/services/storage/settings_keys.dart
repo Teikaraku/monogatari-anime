@@ -470,6 +470,12 @@ class SettingsKeys {
     'list',
     group: SettingGroup.interface,
   );
+  // CollectSort name; the 追番 page remembers the last choice.
+  static const collectSort = SettingKey<String>(
+    'collectSort',
+    'recentlyWatched',
+    group: SettingGroup.interface,
+  );
   static const downloadParallelEpisodes = SettingKey<int>(
     _SettingBoxKey.downloadParallelEpisodes,
     2,
@@ -519,6 +525,12 @@ class SettingsKeys {
   );
   static const bangumiImmediateSyncToastEnable = SettingKey<bool>(
     _SettingBoxKey.bangumiImmediateSyncToastEnable,
+    true,
+    group: SettingGroup.bangumi,
+  );
+  // Marks a collected subject's episode as watched on Bangumi once played.
+  static const bangumiEpisodeSyncEnable = SettingKey<bool>(
+    'bangumiEpisodeSyncEnable',
     true,
     group: SettingGroup.bangumi,
   );
@@ -644,6 +656,7 @@ class SettingsKeys {
     proxyTestUrl,
     showRating,
     defaultCollectLayout,
+    collectSort,
     downloadParallelEpisodes,
     downloadParallelSegments,
     downloadDanmaku,
@@ -654,6 +667,7 @@ class SettingsKeys {
     bangumiAccessToken,
     bangumiSyncPriority,
     bangumiImmediateSyncToastEnable,
+    bangumiEpisodeSyncEnable,
     brightnessVolumeGesture,
     historySyncDeviceId,
     historySyncSequence,

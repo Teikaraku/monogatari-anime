@@ -50,8 +50,9 @@ class DownloadDirectoryService {
         GStorage.getSetting(SettingsKeys.downloadDirectoryBookmark),
         isDirectory: true,
       );
-      _accessLost =
-          !await _bookmarks.startAccessingSecurityScopedResource(restored);
+      _accessLost = !await _bookmarks.startAccessingSecurityScopedResource(
+        restored,
+      );
       // The bookmark follows the directory when the user moves it.
       if (!_accessLost && !path.equals(restored.path, directory)) {
         await GStorage.putSetting(

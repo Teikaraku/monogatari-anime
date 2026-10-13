@@ -66,7 +66,7 @@ bool isSingleInstance()
   {
     return true;
   }
-  std::wstring mutex_str = L"kazumi.win.mutex";
+  std::wstring mutex_str = L"monogatari.anime.win.mutex";
   mutex = ::CreateMutex(NULL, TRUE, mutex_str.c_str());
   if (mutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS)
   {

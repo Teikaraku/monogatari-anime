@@ -5,6 +5,7 @@ import 'package:kazumi/request/clients/bangumi_client.dart';
 import 'package:kazumi/request/core/network_exception.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/modules/bangumi/bangumi_relation.dart';
+import 'package:kazumi/modules/bangumi/bangumi_subject_detail.dart';
 import 'package:kazumi/modules/comments/comment_response.dart';
 import 'package:kazumi/modules/characters/characters_response.dart';
 import 'package:kazumi/modules/bangumi/episode_item.dart';
@@ -56,54 +57,73 @@ class BangumiApi {
     return bangumiCalendar;
   }
 
-  // Season switching: Bangumi search by air date, through the relay in mirror mode.
-  static Future<List<List<BangumiItem>>> getCalendarBySearch(
-      List<String> dateRange, int limit, int offset) async {
-    List<BangumiItem> bangumiList = [];
-    List<List<BangumiItem>> bangumiCalendar = [];
-    var params = <String, dynamic>{
-      "keyword": "",
-      "sort": "rank",
-      "filter": {
-        "type": [2],
-        "tag": ["日本"],
-        "air_date": [">=${dateRange[0]}", "<${dateRange[1]}"],
-        "rank": [">0", "<=99999"],
-        "nsfw": true
-      }
-    };
-    try {
-      final url = ApiEndpoints.formatUrl(
-          ApiEndpoints.bangumiAPIDomain + ApiEndpoints.bangumiRankSearch,
-          [limit, offset]);
+  /// Broadcast types a past season's timetable lists; films and OVAs are
+  /// one-offs, not weekly shows.
+  static const _seasonPlatforms = ['TV', 'WEB'];
+
+  /// Every TV and web series that premiered within [dateRange], grouped by
+  /// the weekday of its first broadcast (index 0 = Monday). Past seasons have
+  /// no Bangumi calendar, so this searches by air date instead.
+  static Future<List<List<BangumiItem>>> getSeasonCalendar(
+      List<String> dateRange) async {
+    // The search caps pages at 20 whatever the limit asks for.
+    const pageSize = 20;
+    // Guards against an absurd reported total.
+    const maxPerPlatform = 600;
+    // Search accepts plain dates; DateTime.toString() adds a time part.
+    String day(String value) => value.length >= 10 ? value.substring(0, 10) : value;
+
+    Future<Map<String, dynamic>> page(String platform, int offset) async {
       final jsonData = await _client.post(
-        url,
-        data: params,
+        ApiEndpoints.formatUrl(
+            ApiEndpoints.bangumiAPIDomain + ApiEndpoints.bangumiRankSearch,
+            [pageSize, offset]),
+        data: <String, dynamic>{
+          'keyword': '',
+          'sort': 'heat',
+          'filter': {
+            'type': [2],
+            'meta_tags': [platform],
+            'air_date': ['>=${day(dateRange[0])}', '<${day(dateRange[1])}'],
+            'nsfw': false,
+          },
+        },
       );
-      final jsonList = jsonData['data'];
-      for (dynamic jsonItem in jsonList) {
-        if (jsonItem is Map<String, dynamic>) {
-          bangumiList.add(BangumiItem.fromJson(jsonItem));
-        }
-      }
-    } catch (e) {
-      KazumiLogger().e('Resolve bangumi list failed', error: e);
+      return Map<String, dynamic>.from(jsonData as Map);
     }
-    try {
-      for (int weekday = 1; weekday <= 7; weekday++) {
-        List<BangumiItem> bangumiDayList = [];
-        for (BangumiItem bangumiItem in bangumiList) {
-          if (bangumiItem.airWeekday == weekday) {
-            bangumiDayList.add(bangumiItem);
-          }
-        }
-        bangumiCalendar.add(bangumiDayList);
-      }
-    } catch (e) {
-      KazumiLogger()
-          .e('Network: fetch bangumi item to calendar failed', error: e);
+
+    // The first page gives the total; the rest are fetched together.
+    Future<List<dynamic>> platformItems(String platform) async {
+      final first = await page(platform, 0);
+      final total =
+          ((first['total'] as num?)?.toInt() ?? 0).clamp(0, maxPerPlatform);
+      final rest = await Future.wait([
+        for (var offset = pageSize; offset < total; offset += pageSize)
+          page(platform, offset),
+      ]);
+      return [
+        ...(first['data'] as List? ?? const []),
+        for (final response in rest) ...(response['data'] as List? ?? const []),
+      ];
     }
-    return bangumiCalendar;
+
+    final pages =
+        await Future.wait(_seasonPlatforms.map(platformItems));
+    final seen = <int>{};
+    final items = <BangumiItem>[];
+    for (final jsonItem in pages.expand((list) => list)) {
+      if (jsonItem is! Map<String, dynamic>) continue;
+      try {
+        final item = BangumiItem.fromJson(jsonItem);
+        if (item.airDate.isNotEmpty && seen.add(item.id)) items.add(item);
+      } catch (e) {
+        KazumiLogger().w('BangumiApi: skipped malformed season item', error: e);
+      }
+    }
+    return List.generate(
+      7,
+      (index) => items.where((item) => item.airWeekday == index + 1).toList(),
+    );
   }
 
   /// Anime carrying the Bangumi public tag [metaTag] (an official 类型 such as
@@ -268,7 +288,12 @@ class BangumiApi {
     }
   }
 
-  static Future<BangumiItem?> getBangumiInfoByID(int id) async {
+  static Future<BangumiItem?> getBangumiInfoByID(int id) async =>
+      (await getBangumiSubjectByID(id))?.$1;
+
+  /// The subject as a [BangumiItem] plus the detail-page fields it lacks.
+  static Future<(BangumiItem, BangumiSubjectDetail)?> getBangumiSubjectByID(
+      int id) async {
     try {
       final jsonData = await _client.get(
         ApiEndpoints.formatUrl(
@@ -276,7 +301,10 @@ class BangumiApi {
                 ApiEndpoints.bangumiInfoByIDNext,
             [id]),
       );
-      return BangumiItem.fromJson(jsonData);
+      return (
+        BangumiItem.fromJson(jsonData),
+        BangumiSubjectDetail.fromJson(jsonData),
+      );
     } catch (e) {
       KazumiLogger().e('Network: resolve bangumi item failed', error: e);
       return null;
@@ -335,35 +363,51 @@ class BangumiApi {
 
   static Future<List<EpisodeInfo>> getBangumiEpisodesByID(int id) async {
     final List<EpisodeInfo> episodeList = [];
-    const int limit = 100;
-    int offset = 0;
-    int? total;
     try {
-      do {
-        final params = <String, dynamic>{
-          'subject_id': id,
-          'offset': offset,
-          'limit': limit,
-        };
-        final jsonData = await _client.get(
-          ApiEndpoints.bangumiAPIDomain + ApiEndpoints.bangumiEpisodeByID,
-          queryParameters: params,
-        );
-        total ??= jsonData['total'] as int?;
-        final data = jsonData['data'] as List<dynamic>? ?? [];
-        if (data.isEmpty) {
-          break;
-        }
-        episodeList.addAll(data
-            .whereType<Map<String, dynamic>>()
-            .map((jsonItem) => EpisodeInfo.fromJson(jsonItem)));
-        offset += data.length;
-      } while (total == null || offset < total);
+      await _collectEpisodes(id, episodeList);
     } catch (e) {
       KazumiLogger()
           .e('Network: resolve bangumi episode list failed', error: e);
     }
     return episodeList;
+  }
+
+  /// Main episodes (type 0) in Bangumi's order; throws when a page fails.
+  static Future<List<EpisodeInfo>> getBangumiMainEpisodesByID(int id) async {
+    final List<EpisodeInfo> episodeList = [];
+    await _collectEpisodes(id, episodeList, type: 0);
+    return episodeList;
+  }
+
+  static Future<void> _collectEpisodes(
+    int id,
+    List<EpisodeInfo> episodeList, {
+    int? type,
+  }) async {
+    const int limit = 100;
+    int offset = 0;
+    int? total;
+    do {
+      final params = <String, dynamic>{
+        'subject_id': id,
+        'type': ?type,
+        'offset': offset,
+        'limit': limit,
+      };
+      final jsonData = await _client.get(
+        ApiEndpoints.bangumiAPIDomain + ApiEndpoints.bangumiEpisodeByID,
+        queryParameters: params,
+      );
+      total ??= jsonData['total'] as int?;
+      final data = jsonData['data'] as List<dynamic>? ?? [];
+      if (data.isEmpty) {
+        break;
+      }
+      episodeList.addAll(data
+          .whereType<Map<String, dynamic>>()
+          .map((jsonItem) => EpisodeInfo.fromJson(jsonItem)));
+      offset += data.length;
+    } while (total == null || offset < total);
   }
 
   static Future<EpisodeCommentResponse> getBangumiCommentsByEpisodeID(
@@ -627,6 +671,21 @@ class BangumiApi {
       KazumiLogger().e('Network: update bangumi collection failed', error: e);
       rethrow;
     }
+  }
+
+  /// Marks episodes of a subject the user has collected as watched (看过).
+  /// Bangumi rejects subjects outside the user's collection.
+  static Future<void> markEpisodesWatched(
+      int subjectId, List<int> episodeIds) async {
+    await _writeRateLimiter.acquire();
+    await _client.patch(
+      ApiEndpoints.formatUrl(
+          ApiEndpoints.bangumiAuthAPIMirrorDomain +
+              ApiEndpoints.bangumiSetEpisodesCollection,
+          [subjectId]),
+      data: {'episode_id': episodeIds, 'type': 2},
+      requiresAuth: true,
+    );
   }
 
   static Future<bool> updateBangumiByType(int id, int localType) async {

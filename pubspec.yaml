@@ -1,7 +1,7 @@
 name: kazumi
 description: "物语 (Monogatari), a cross-platform anime client."
 publish_to: "none"
-version: 2.3.8+20308
+version: 2.3.9+20309
 
 environment:
   sdk: ">=3.10.0 <4.0.0"
@@ -149,7 +149,8 @@ flutter_native_splash:
 msix_config:
   display_name: Monogatari
   output_name: Monogatari
-  publisher: CN=SignPath Foundation, O=SignPath Foundation, L=Lewes, S=Delaware, C=US
+  publisher: CN=Monogatari
+  identity_name: Monogatari.Anime
   logo_path: assets/images/logo/logo_rounded.png
   sign_msix: false
   install_certificate: false
@@ -159,7 +160,6 @@ flutter:
   uses-material-design: true
   assets:
     - assets/images/
-    - assets/plugins/
     - assets/shaders/
     - assets/images/logo/
     - licenses/ech_http/
