@@ -20,6 +20,9 @@ Local changes:
 - Start the scheduler paused before announcing trackers, so only explicitly selected files or requested playback windows are downloaded.
 - Configure an optional loopback peer allowance before tracker responses arrive; only the standalone real-peer tests enable this option.
 - Bootstrap DHT in the background so DNS delays cannot block working trackers; guard late socket/bootstrap completions after stop and await in-progress file initialization before releasing resources.
+- Encode DHT transaction IDs and info-hashes as bencoded byte strings and decode response kinds from bytes; the original codec mismatch rejected valid public DHT responses.
+- Follow DHT referrals by XOR distance with bounded parallel lookup, per-query expiry and periodic rediscovery; validate reply endpoints and transaction IDs, bound the node table, and cancel discovery timers on stop.
+- Bound HTTP tracker connection/response time and payload size, reject unsuccessful status codes, and preserve original tracker query parameters.
 
 The application uses its own loopback HTTP Range server, cancellation and task
 persistence. It does not use the upstream single-reader streaming interface.

@@ -24,6 +24,22 @@ class SystemProxyState {
 
   bool get hasProxy => httpProxy != null || httpsProxy != null;
 
+  /// Resolves the exact media/request URI using the same Windows bypass rules.
+  /// Kept on the snapshot so this decision can also be checked without changing
+  /// the user's registry or starting the platform watcher.
+  String findProxy(Uri url) {
+    if (!hasProxy || SystemProxyService._shouldBypass(url, this)) {
+      return 'DIRECT';
+    }
+    final proxy = switch (url.scheme) {
+      'https' => httpsProxy,
+      'http' => httpProxy,
+      _ => null,
+    };
+    if (proxy == null) return 'DIRECT';
+    return 'PROXY ${proxy.$1}:${proxy.$2}';
+  }
+
   bool sameAs(SystemProxyState other) {
     if (httpProxy != other.httpProxy || httpsProxy != other.httpsProxy) {
       return false;
@@ -96,12 +112,7 @@ class SystemProxyService {
   static String findProxy(Uri url) {
     try {
       if (!isActive) return 'DIRECT';
-      final state = _state;
-      if (_shouldBypass(url, state)) return 'DIRECT';
-      final proxy =
-          url.scheme == 'https' ? state.httpsProxy : state.httpProxy;
-      if (proxy == null) return 'DIRECT';
-      return 'PROXY ${proxy.$1}:${proxy.$2}';
+      return _state.findProxy(url);
     } catch (_) {
       return 'DIRECT';
     }

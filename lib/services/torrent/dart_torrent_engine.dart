@@ -10,6 +10,7 @@ import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
 import 'package:dtorrent_task_v2/dtorrent_task_v2.dart' as bt;
 import 'package:path/path.dart' as p;
+import 'package:kazumi/services/network/mikan_http_adapter.dart';
 
 import 'torrent_engine.dart';
 import 'torrent_models.dart';
@@ -508,6 +509,12 @@ class _TorrentWorker {
           return client;
         },
       );
+      if (MikanHttpAdapter.supports(source)) {
+        dio.httpClientAdapter = MikanHttpAdapter(
+          fallback: dio.httpClientAdapter,
+          proxyForUri: (_) => proxy == null ? null : Uri.parse(proxy),
+        );
+      }
       try {
         final response = await dio.get<ResponseBody>(
           source.toString(),

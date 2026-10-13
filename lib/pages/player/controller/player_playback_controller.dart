@@ -10,8 +10,7 @@ import 'package:kazumi/pages/player/controller/player_super_resolution.dart';
 import 'package:kazumi/services/shaders/shader_asset_service.dart';
 import 'package:kazumi/utils/constants.dart';
 import 'package:kazumi/services/logging/logger.dart';
-import 'package:kazumi/services/network/proxy_utils.dart';
-import 'package:kazumi/services/network/system_proxy_service.dart';
+import 'package:kazumi/request/core/network_config.dart';
 import 'package:kazumi/services/player/playback_cache_policy.dart';
 import 'package:kazumi/services/player/player_error_mapper.dart';
 import 'package:kazumi/services/storage/storage.dart';
@@ -360,28 +359,16 @@ abstract class _PlayerPlaybackController with Store {
         }
       }
 
-      final bool proxyEnable = GStorage.getSetting(SettingsKeys.proxyEnable);
-      if (isTorrentStream) {
-        await pp.setProperty('http-proxy', '');
-      } else if (proxyEnable) {
-        final String proxyUrl = GStorage.getSetting(SettingsKeys.proxyUrl);
-        final formattedProxy = ProxyUtils.getFormattedProxyUrl(proxyUrl);
-        if (formattedProxy != null) {
-          await pp.setProperty("http-proxy", formattedProxy);
-          if (!isCurrentPlayer(player)) {
-            return await _discardIfNotCurrent(candidate);
-          }
-          KazumiLogger().i('Player: HTTP 代理设置成功 $formattedProxy');
-        }
-      } else if (SystemProxyService.isActive) {
-        final proxy = SystemProxyService.proxyFor('https');
-        if (proxy != null) {
-          await pp.setProperty("http-proxy", 'http://${proxy.$1}:${proxy.$2}');
-          if (!isCurrentPlayer(player)) {
-            return await _discardIfNotCurrent(candidate);
-          }
-          KazumiLogger().i('Player: 跟随系统代理 http://${proxy.$1}:${proxy.$2}');
-        }
+      // Use the same per-URI scheme and bypass rules as API requests. Taking
+      // only the Windows HTTPS proxy would send explicitly bypassed CDNs and
+      // HTTP videos through the wrong route.
+      final mediaUri = Uri.tryParse(videoUrl());
+      final proxy = isTorrentStream || isLocalPlayback() || mediaUri == null
+          ? null
+          : NetworkConfig.fromSettings().proxyForUri(mediaUri);
+      await pp.setProperty('http-proxy', proxy?.toString() ?? '');
+      if (!isCurrentPlayer(player)) {
+        return await _discardIfNotCurrent(candidate);
       }
 
       await player.setAudioTrack(AudioTrack.auto());

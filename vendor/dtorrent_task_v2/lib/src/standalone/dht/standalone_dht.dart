@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:b_encode_decode/b_encode_decode.dart';
 import 'package:dtorrent_task_v2/src/standalone/dtorrent_common.dart';
@@ -104,6 +105,7 @@ class _PendingQuery {
   final String kind;
   final CompactAddress node;
   final String? infoHash;
+  Timer? timeout;
 
   _PendingQuery({
     required this.kind,
@@ -129,6 +131,14 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
   final StreamController<StandaloneDHTDriverEvent> _controller =
       StreamController<StandaloneDHTDriverEvent>.broadcast();
   final Map<String, CompactAddress> _nodes = {};
+  final Map<String, List<int>> _nodeIds = {};
+  final Map<String, Set<String>> _queriedNodes = {};
+  Timer? _refreshTimer;
+  final Duration queryTimeout;
+  final Duration refreshInterval;
+  static const _lookupConcurrency = 8;
+  static const _lookupBudget = 128;
+  static const _nodeLimit = 512;
   final Map<String, _PendingQuery> _pendingQueries = {};
   final Map<String, Map<String, List<int>>> _tokensByNodeAndInfoHash = {};
   final Map<String, int> _announcePorts = {};
@@ -145,9 +155,13 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
   int _tidCounter = 0;
   late final List<int> _nodeId;
 
-  InRepoStandaloneDHTDriver() {
+  InRepoStandaloneDHTDriver({
+    Iterable<Uri>? bootstrapNodes,
+    this.queryTimeout = const Duration(seconds: 6),
+    this.refreshInterval = const Duration(seconds: 30),
+  }) {
     _nodeId = randomBytes(20, true);
-    _bootstrapNodes.addAll(_defaultBootstrapNodes);
+    _bootstrapNodes.addAll(bootstrapNodes ?? _defaultBootstrapNodes);
   }
 
   @override
@@ -216,10 +230,13 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
       throw StateError('DHT bootstrap failed: no UDP sockets available');
     }
 
-    for (final uri in _bootstrapNodes) {
-      if (_stopped) return null;
-      await _bootstrapViaNode(uri);
-    }
+    await Future.wait(_bootstrapNodes.map(_bootstrapViaNode));
+    if (_stopped) return null;
+    _refreshTimer ??= Timer.periodic(refreshInterval, (_) {
+      for (final infoHash in _queriedNodes.keys.toList()) {
+        requestPeers(infoHash);
+      }
+    });
     return _preferredSocket()?.port;
   }
 
@@ -274,15 +291,34 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
     }
 
     if (message is! Map) return;
-    if (message['y'] != 'r') return;
+    final responseType = _asBytes(message['y']);
+    if (responseType == null ||
+        responseType.length != 1 ||
+        (responseType.single != 114 && responseType.single != 101)) {
+      return;
+    }
 
     final tidBytes = _asBytes(message['t']);
     if (tidBytes == null || tidBytes.isEmpty) return;
     final tid = String.fromCharCodes(tidBytes);
-    final pending = _pendingQueries.remove(tid);
+    final pending = _pendingQueries[tid];
+    if (pending == null ||
+        pending.node.address != datagram.address ||
+        pending.node.port != datagram.port) {
+      return;
+    }
+    _pendingQueries.remove(tid);
+    pending.timeout?.cancel();
 
     final response = message['r'];
-    if (response is! Map) return;
+    if (response is! Map) {
+      if (pending.infoHash != null) _pumpLookup(pending.infoHash!);
+      return;
+    }
+    final nodeId = _asBytes(response['id']);
+    if (nodeId != null && nodeId.length == 20) {
+      _rememberNode(pending.node, nodeId);
+    }
 
     final nodesData = _asBytes(response['nodes']);
     if (nodesData != null && nodesData.isNotEmpty) {
@@ -294,9 +330,13 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
       _addNodesFromCompact(nodes6Data, true);
     }
 
-    if (pending == null ||
-        pending.kind != 'get_peers' ||
-        pending.infoHash == null) {
+    // find_node replies commonly arrive after bootstrap() has returned and
+    // announce() has already queried the routers. Continue through these new
+    // contacts instead of waiting forever on the initial router-only lookup.
+    if (pending.kind != 'get_peers' || pending.infoHash == null) {
+      for (final infoHash in _queriedNodes.keys.toList()) {
+        _pumpLookup(infoHash);
+      }
       return;
     }
 
@@ -335,6 +375,26 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
         );
       }
     }
+    _pumpLookup(infoHash);
+  }
+
+  void _rememberNode(CompactAddress address, List<int>? nodeId) {
+    if (!_isFamilyEnabled(address.address.type) ||
+        address.port == 0 ||
+        address.address.isMulticast ||
+        address.address == InternetAddress.anyIPv4 ||
+        address.address == InternetAddress.anyIPv6) {
+      return;
+    }
+    final endpoint = _endpoint(address);
+    if (!_nodes.containsKey(endpoint) && _nodes.length >= _nodeLimit) {
+      final oldest = _nodes.keys.first;
+      _nodes.remove(oldest);
+      _nodeIds.remove(oldest);
+      _tokensByNodeAndInfoHash.remove(oldest);
+    }
+    _nodes[endpoint] = address;
+    if (nodeId != null) _nodeIds[endpoint] = nodeId;
   }
 
   void _addNodesFromCompact(List<int> nodesData, bool ipv6) {
@@ -347,7 +407,7 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
           ? CompactAddress.parseIPv6Address(nodesData, addrOffset)
           : CompactAddress.parseIPv4Address(nodesData, addrOffset);
       if (address == null) continue;
-      _nodes.putIfAbsent(_endpoint(address), () => address);
+      _rememberNode(address, nodesData.sublist(offset, offset + 20));
     }
   }
 
@@ -390,12 +450,51 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
       throw ArgumentError.value(infoHash, 'infoHash', 'must be 20-byte string');
     }
 
-    final nodes = _nodes.values.toList()
-      ..sort((a, b) => _addressPriority(a.address.type)
-          .compareTo(_addressPriority(b.address.type)));
+    // Keep one bounded lookup per hash. Periodic refresh starts a new round
+    // only after the preceding round has completed or timed out.
+    if (_pendingQueries.values.any(
+        (query) => query.kind == 'get_peers' && query.infoHash == infoHash)) {
+      return;
+    }
+    _queriedNodes[infoHash] = <String>{};
+    _pumpLookup(infoHash);
+  }
+
+  void _pumpLookup(String infoHash) {
+    if (_stopped || !_hasAnySocket) return;
+    final visited = _queriedNodes[infoHash];
+    if (visited == null || visited.length >= _lookupBudget) return;
+    var slots = _lookupConcurrency -
+        _pendingQueries.values
+            .where((query) =>
+                query.kind == 'get_peers' && query.infoHash == infoHash)
+            .length;
+    final nodes = _nodes.values
+        .where((node) =>
+            !visited.contains(_endpoint(node)) &&
+            _socketForAddress(node.address.type) != null)
+        .toList()
+      ..sort((a, b) => _compareDistance(a, b, infoHash));
     for (final node in nodes) {
+      if (slots-- <= 0 || visited.length >= _lookupBudget) break;
+      visited.add(_endpoint(node));
       _sendGetPeers(node: node, infoHash: infoHash);
     }
+  }
+
+  int _compareDistance(CompactAddress a, CompactAddress b, String infoHash) {
+    final left = _nodeIds[_endpoint(a)], right = _nodeIds[_endpoint(b)];
+    if (left != null && right != null) {
+      for (var index = 0; index < 20; index++) {
+        final comparison = (left[index] ^ infoHash.codeUnitAt(index))
+            .compareTo(right[index] ^ infoHash.codeUnitAt(index));
+        if (comparison != 0) return comparison;
+      }
+    } else if (left != null || right != null) {
+      return left == null ? 1 : -1;
+    }
+    return _addressPriority(a.address.type)
+        .compareTo(_addressPriority(b.address.type));
   }
 
   @override
@@ -419,7 +518,7 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
         return;
       }
 
-      final ips = await InternetAddress.lookup(host);
+      final ips = await InternetAddress.lookup(host).timeout(queryTimeout);
       if (_stopped) return;
       for (final resolved in ips) {
         if (_isFamilyEnabled(resolved.type)) {
@@ -432,7 +531,7 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
   }
 
   void _sendFindNode(CompactAddress node) {
-    _nodes.putIfAbsent(_endpoint(node), () => node);
+    _rememberNode(node, null);
     final target = randomBytes(20, true);
     _sendQuery(
       node: node,
@@ -446,7 +545,7 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
   }
 
   void _sendGetPeers({required CompactAddress node, required String infoHash}) {
-    final infoHashBytes = infoHash.codeUnits;
+    final infoHashBytes = Uint8List.fromList(infoHash.codeUnits);
     _sendQuery(
       node: node,
       query: 'get_peers',
@@ -469,9 +568,9 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
       query: 'announce_peer',
       args: {
         'id': _nodeId,
-        'info_hash': infoHash.codeUnits,
+        'info_hash': Uint8List.fromList(infoHash.codeUnits),
         'port': port,
-        'token': token,
+        'token': Uint8List.fromList(token),
         'implied_port': 0,
       },
       pending:
@@ -486,13 +585,18 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
     required _PendingQuery pending,
   }) {
     final socket = _socketForAddress(node.address.type);
-    if (_stopped || socket == null) return;
+    if (_stopped || socket == null || _pendingQueries.length >= 256) return;
 
     final tid = _nextTid();
     _pendingQueries[tid] = pending;
+    pending.timeout = Timer(queryTimeout, () {
+      if (!identical(_pendingQueries[tid], pending)) return;
+      _pendingQueries.remove(tid);
+      if (pending.infoHash != null) _pumpLookup(pending.infoHash!);
+    });
 
     final packet = {
-      't': tid.codeUnits,
+      't': Uint8List.fromList(tid.codeUnits),
       'y': 'q',
       'q': query,
       'a': args,
@@ -504,17 +608,19 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
       socket.send(encoded, node.address, node.port);
     } catch (e) {
       _pendingQueries.remove(tid);
+      pending.timeout?.cancel();
       _emitError('send $query failed to $node: $e');
+      if (pending.infoHash != null) {
+        scheduleMicrotask(() => _pumpLookup(pending.infoHash!));
+      }
     }
   }
 
   RawDatagramSocket? _socketForAddress(InternetAddressType type) {
     if (type == InternetAddressType.IPv6) {
-      return _socketV6 ??
-          (_isFamilyEnabled(InternetAddressType.IPv4) ? _socketV4 : null);
+      return _socketV6;
     }
-    return _socketV4 ??
-        (_isFamilyEnabled(InternetAddressType.IPv6) ? _socketV6 : null);
+    return _socketV4;
   }
 
   int _addressPriority(InternetAddressType type) {
@@ -553,6 +659,11 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
   @override
   Future<void> stop() async {
     _stopped = true;
+    _refreshTimer?.cancel();
+    _refreshTimer = null;
+    for (final pending in _pendingQueries.values) {
+      pending.timeout?.cancel();
+    }
     await _socketSubV4?.cancel();
     await _socketSubV6?.cancel();
     _socketSubV4 = null;
@@ -562,6 +673,8 @@ class InRepoStandaloneDHTDriver implements StandaloneDHTDriver {
     _socketV4 = null;
     _socketV6 = null;
     _nodes.clear();
+    _nodeIds.clear();
+    _queriedNodes.clear();
     _pendingQueries.clear();
     _tokensByNodeAndInfoHash.clear();
     _announcePorts.clear();

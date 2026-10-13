@@ -7,6 +7,7 @@ import 'package:html/parser.dart' as html;
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/request/core/dio_factory.dart';
 import 'package:kazumi/request/core/network_config.dart';
+import 'package:kazumi/services/network/mikan_http_adapter.dart';
 import 'package:xml/xml.dart';
 
 import 'rss_models.dart';
@@ -66,13 +67,20 @@ class MikanRssClient {
   MikanRssClient({
     Dio? dio,
     MikanRssTransport? transport,
+    NetworkConfig Function()? networkConfig,
+    Dio Function(NetworkConfig)? createDio,
     this.requestTimeout = const Duration(seconds: 20),
     DateTime Function()? clock,
   }) : _dio = dio,
        _transport = transport,
+       _networkConfig = networkConfig ?? NetworkConfig.fromSettings,
+       _createDio = createDio ?? _createMikanDio,
        _clock = clock ?? DateTime.now;
   final Dio? _dio;
   Dio? _ownedDio;
+  (Uri?, bool)? _ownedRoute;
+  final NetworkConfig Function() _networkConfig;
+  final Dio Function(NetworkConfig) _createDio;
   final MikanRssTransport? _transport;
   final DateTime Function() _clock;
   final Duration requestTimeout;
@@ -214,11 +222,7 @@ class MikanRssClient {
       } else {
         // An imported personal RSS URL can contain a secret token. Use a
         // dedicated client with request logging disabled instead of apiDio.
-        final dio =
-            _dio ??
-            (_ownedDio ??= DioFactory.createForConfig(
-              NetworkConfig.fromSettings().copyWith(enableLog: false),
-            ));
+        final dio = _dio ?? _clientFor(uri);
         request = dio
             .get<String>(
               uri.toString(),
@@ -252,7 +256,31 @@ class MikanRssClient {
     }
   }
 
+  Dio _clientFor(Uri uri) {
+    final config = _networkConfig().copyWith(enableLog: false);
+    final route = (config.proxyForUri(uri), config.allowBadCertificates);
+    if (_ownedDio == null || _ownedRoute != route) {
+      // This client is deliberately outside DioFactory's shared clients to
+      // protect personal RSS tokens. Refresh its connection pool too when a
+      // manual/system proxy changes, without cancelling in-flight requests.
+      final previous = _ownedDio;
+      _ownedDio = _createDio(config);
+      _ownedRoute = route;
+      previous?.close();
+    }
+    return _ownedDio!;
+  }
+
   void dispose() => _ownedDio?.close(force: true);
+}
+
+Dio _createMikanDio(NetworkConfig config) {
+  final dio = DioFactory.createForConfig(config);
+  dio.httpClientAdapter = MikanHttpAdapter(
+    fallback: dio.httpClientAdapter,
+    proxyForUri: config.proxyForUri,
+  );
+  return dio;
 }
 
 List<MikanShow> parseMikanSearch(String source) {

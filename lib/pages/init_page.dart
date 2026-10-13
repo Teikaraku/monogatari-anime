@@ -16,7 +16,6 @@ import 'package:kazumi/pages/download/download_controller.dart';
 import 'package:kazumi/services/download/background_download_service.dart';
 import 'package:kazumi/services/platform/windows_shortcut.dart';
 import 'package:kazumi/services/platform/platform_environment_service.dart';
-import 'package:kazumi/services/update/startup_update_check.dart';
 import 'package:kazumi/navigation.dart';
 
 class InitPage extends StatefulWidget {
@@ -79,14 +78,7 @@ class _InitPageState extends State<InitPage> {
       return;
     }
     final updateController = myController;
-    unawaited(
-      runStartupUpdateCheck(
-        isEnabled: () => GStorage.getSetting(SettingsKeys.autoUpdate),
-        checkForUpdate: () async {
-          await updateController.checkUpdate(type: 'auto');
-        },
-      ),
-    );
+    unawaited(updateController.checkUpdate(type: 'auto'));
     _startDefaultPage();
   }
 

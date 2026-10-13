@@ -5,8 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:kazumi/bean/dialog/dialog_helper.dart';
 import 'package:kazumi/request/config/api_endpoints.dart';
 import 'package:kazumi/services/logging/logger.dart';
-import 'package:kazumi/services/storage/storage.dart';
 import 'package:kazumi/services/update/github_release_metadata.dart';
+import 'package:kazumi/services/update/startup_update_check.dart';
 import 'package:kazumi/services/update/update_package_downloader.dart';
 import 'package:kazumi/services/update/windows_update_installer.dart';
 import 'package:kazumi/utils/date_time.dart';
@@ -23,6 +23,7 @@ class AutoUpdater {
   factory AutoUpdater() => _instance;
 
   final _metadata = GitHubReleaseMetadata();
+  final _startupCheck = StartupUpdateCheck();
   final _packageDownloader = UpdatePackageDownloader();
   final _downloadDialogs = KazumiDialogController();
   final _downloadProgress = ValueNotifier<double?>(null);
@@ -65,15 +66,16 @@ class AutoUpdater {
     );
   }
 
-  Future<void> autoCheckForUpdates() async {
-    if (!GStorage.getSetting(SettingsKeys.autoUpdate)) return;
-    try {
-      final update = await checkForUpdates();
-      if (update != null) await _showUpdateDialog(update, isAutoCheck: true);
-    } catch (error) {
-      KazumiLogger().w('Update: automatic GitHub check failed', error: error);
-    }
-  }
+  Future<void> autoCheckForUpdates() => _startupCheck.run(
+    checkForUpdate: () async {
+      try {
+        final update = await checkForUpdates();
+        if (update != null) await _showUpdateDialog(update);
+      } catch (error) {
+        KazumiLogger().w('Update: automatic GitHub check failed', error: error);
+      }
+    },
+  );
 
   Future<void> manualCheckForUpdates() async {
     try {
@@ -91,10 +93,7 @@ class AutoUpdater {
     }
   }
 
-  Future<void> _showUpdateDialog(
-    UpdateInfo update, {
-    bool isAutoCheck = false,
-  }) async {
+  Future<void> _showUpdateDialog(UpdateInfo update) async {
     if (_updateDialogOpen) return;
     _updateDialogOpen = true;
     final types = update.availableInstallationTypes;
@@ -143,15 +142,6 @@ class AutoUpdater {
             ),
           ),
           actions: [
-            if (isAutoCheck)
-              TextButton(
-                onPressed: () {
-                  GStorage.putSetting(SettingsKeys.autoUpdate, false);
-                  KazumiDialog.dismiss();
-                  KazumiDialog.showToast(message: '已关闭自动更新');
-                },
-                child: const Text('关闭自动更新'),
-              ),
             TextButton(
               onPressed: () => KazumiDialog.dismiss(),
               child: const Text('稍后提醒'),

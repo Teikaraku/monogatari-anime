@@ -7,6 +7,7 @@ import 'package:kazumi/services/api_video/api_video_service.dart';
 import 'package:kazumi/services/player/automatic_playback_runner.dart';
 import 'package:kazumi/services/player/media_startup_gate.dart';
 import 'package:kazumi/services/player/playback_source_preferences.dart';
+import 'package:kazumi/services/player/rss_playback_status.dart';
 import 'package:kazumi/services/rss/rss_playback_resolver.dart';
 import 'package:kazumi/services/rss/rss_models.dart';
 import 'package:kazumi/services/torrent/torrent_models.dart';
@@ -470,8 +471,8 @@ abstract class _VideoPageController with Store implements Disposable {
       await _cleanUpPlayback(() async => await lease?.close());
       return;
     }
-    await _cleanUpPlayback(player.stop);
     await _cleanUpPlayback(() async => await lease?.close());
+    await _cleanUpPlayback(player.stop);
     if (session.isStale) return;
     playbackSource = source;
     _requestedRssRelease = null;
@@ -1263,16 +1264,18 @@ abstract class _VideoPageController with Store implements Disposable {
         return;
       }
       _torrentLease = lease;
-      _torrentProgress = resolver.torrents.watchTasks.listen((tasks) {
+      TorrentTaskSnapshot? latestTask;
+      void updateProgress(List<TorrentTaskSnapshot> tasks) {
         if (session.isStale || !_loading || _automaticPlayback != null) return;
         for (final task in tasks) {
           if (task.id != lease.taskId) continue;
-          final speed = (task.downloadBytesPerSecond / 1024).round();
-          playbackStatus = task.state == TorrentTaskState.paused
-              ? '下载已暂停，可在磁力任务中继续'
-              : '正在缓冲 · ${task.peers} 个连接 · $speed KB/s';
+          latestTask = task;
+          playbackStatus = rssBufferingStatus(task);
         }
-      });
+      }
+
+      updateProgress(resolver.torrents.tasks);
+      _torrentProgress = resolver.torrents.watchTasks.listen(updateProgress);
       final params = PlaybackInitParams(
         videoUrl: lease.url.toString(),
         offset: offset,
@@ -1298,7 +1301,7 @@ abstract class _VideoPageController with Store implements Disposable {
         session,
       );
       if (session.isStale) return;
-      if (!playable) throw const RssException('连接做种者或视频缓冲超时，可稍后重试或使用在线播放');
+      if (!playable) throw RssException(rssStartupFailure(latestTask));
       playingEpisode = selectedEpisode;
       playbackStatus = catalog == null
           ? '正在播放磁力文件'
@@ -1335,8 +1338,11 @@ abstract class _VideoPageController with Store implements Disposable {
     player.onPlaybackError = null;
     final lease = _torrentLease;
     _torrentLease = null;
-    await _cleanUpPlayback(player.stop);
+    _log('RSS 播放失败：$message');
+    // Cancel pending piece reads before native disposal, which may itself wait
+    // for its HTTP reader to stop. Otherwise failure recovery can keep waiting.
     await _cleanUpPlayback(() async => await lease?.close());
+    await _cleanUpPlayback(player.stop);
     if (session.isStale) return;
     final number = apiEpisodes[episode.listIndex - 1].number;
     if (number != null && GStorage.getSetting(SettingsKeys.rssFallbackToApi)) {
@@ -1407,13 +1413,10 @@ abstract class _VideoPageController with Store implements Disposable {
           complete(false);
           return;
         }
-        _bufferingTimer?.cancel();
-        _bufferingTimer = null;
-        if (current() &&
-            ready.isCompleted &&
-            buffering &&
-            player.state.playing) {
-          _bufferingTimer = Timer(
+        if (ready.isCompleted && buffering && player.state.playing) {
+          // Native backends may repeat buffering/playing events while stalled.
+          // Keep the deadline for this continuous stall instead of restarting it.
+          _bufferingTimer ??= Timer(
             Duration(seconds: params.isTorrentStream ? 90 : 25),
             () {
               if (current() && player.state.buffering && player.state.playing) {
@@ -1422,6 +1425,9 @@ abstract class _VideoPageController with Store implements Disposable {
               }
             },
           );
+        } else {
+          _bufferingTimer?.cancel();
+          _bufferingTimer = null;
         }
       }
 

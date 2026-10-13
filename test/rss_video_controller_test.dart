@@ -7,6 +7,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/pages/history/history_controller.dart';
+import 'package:kazumi/pages/player/controller/player_danmaku_controller.dart';
+import 'package:kazumi/pages/player/controller/player_playback_controller.dart';
+import 'package:kazumi/pages/player/player_controller.dart';
 import 'package:kazumi/pages/video/video_controller.dart';
 import 'package:kazumi/pages/video/video_playback_args.dart';
 import 'package:kazumi/repositories/download_repository.dart';
@@ -296,6 +299,65 @@ void main() {
     expect(api.loads, 0);
   });
   test(
+    'failed RSS startup releases its pending HTTP reader before native stop',
+    () async {
+      await GStorage.putSetting(SettingsKeys.rssFallbackToApi, false);
+      final released = Completer<void>();
+      resolver.playbackLease = TorrentPlaybackLease(
+        url: Uri.parse('http://127.0.0.1:1234/torrent/fixture'),
+        taskId: 'fixture',
+        fileIndex: 0,
+        close: () async => released.complete(),
+      );
+      (resolver.torrents as _Tasks).saved = [
+        TorrentTaskSnapshot(
+          id: 'fixture',
+          source: Uri.parse('magnet:?xt=urn:btih:fixture'),
+          title: 'Fixture',
+          state: TorrentTaskState.buffering,
+        ),
+      ];
+      final player = _FailedRssPlayer(released.future);
+      controller.applyPlaybackArgs(
+        OnlineVideoPlaybackArgs(bangumiItem: subject, playbackSource: 'rss'),
+      );
+      await controller.initializeOnline();
+      await controller
+          .changeEpisode(1, resumeHistory: false, playerController: player)
+          .timeout(const Duration(seconds: 1));
+      expect(released.isCompleted, isTrue);
+      expect(controller.loading, isFalse);
+      expect(controller.errorMessage, contains('未连接到做种者'));
+      expect(preferences.forSubject(42), 'rss');
+      expect(api.loads, 0);
+    },
+  );
+  test(
+    'RSS failure reaches API fallback without changing source preference',
+    () async {
+      final released = Completer<void>();
+      resolver.playbackLease = TorrentPlaybackLease(
+        url: Uri.parse('http://127.0.0.1:1234/torrent/fixture'),
+        taskId: 'fixture',
+        fileIndex: 0,
+        close: () async => released.complete(),
+      );
+      final player = _FailedRssPlayer(released.future);
+      controller.applyPlaybackArgs(
+        OnlineVideoPlaybackArgs(bangumiItem: subject, playbackSource: 'rss'),
+      );
+      await controller.initializeOnline();
+      await controller
+          .changeEpisode(1, resumeHistory: false, playerController: player)
+          .timeout(const Duration(seconds: 1));
+      expect(released.isCompleted, isTrue);
+      expect(api.candidateLoads, 1);
+      expect(controller.loading, isFalse);
+      expect(controller.errorMessage, contains('已自动尝试全部播放资源'));
+      expect(preferences.forSubject(42), 'rss');
+    },
+  );
+  test(
     'explicit unknown release does not silently start another episode',
     () async {
       controller.applyPlaybackArgs(
@@ -429,6 +491,16 @@ class _Resolver extends RssPlaybackResolver {
   Object? failure;
   Future<RssPlaybackCatalog>? pending;
   CancelToken? token;
+  TorrentPlaybackLease? playbackLease;
+  @override
+  Future<TorrentPlaybackLease> open(
+    RssPlaybackCatalog catalog,
+    ApiVideoEpisode episode, {
+    String? releaseId,
+    bool downloadWhilePlaying = false,
+    required CancelToken cancelToken,
+    void Function(String)? onStatus,
+  }) async => playbackLease!;
   @override
   Future<RssPlaybackCatalog> load(
     int subjectId, {
@@ -438,6 +510,51 @@ class _Resolver extends RssPlaybackResolver {
     if (failure != null) throw failure!;
     return pending ?? Future.value(catalog!);
   }
+}
+
+class _FailedRssPlayer implements PlayerController {
+  _FailedRssPlayer(this.readerReleased);
+  final Future<void> readerReleased;
+  bool opened = false;
+  @override
+  final danmaku = _NoopDanmaku();
+  @override
+  final playback = _NoMediaPlayback();
+  @override
+  bool Function(String error)? onPlaybackError;
+  @override
+  Future<bool> init(PlaybackInitParams params) async {
+    opened = true;
+    return false;
+  }
+
+  @override
+  Future<void> stop() async {
+    // Model a native player whose shutdown awaits the pending network read.
+    if (opened) await readerReleased;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      fail('Unexpected player access: ${invocation.memberName}');
+}
+
+class _NoopDanmaku implements PlayerDanmakuController {
+  @override
+  void finishDanmakuLoad({bool disableDanmaku = false}) {}
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      fail('Unexpected danmaku access: ${invocation.memberName}');
+}
+
+class _NoMediaPlayback implements PlayerPlaybackController {
+  @override
+  Null get mediaPlayer => null;
+  @override
+  Duration get currentPosition => Duration.zero;
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      fail('Unexpected media access: ${invocation.memberName}');
 }
 
 class _Tasks extends TorrentService {
@@ -450,6 +567,17 @@ class _Tasks extends TorrentService {
 
 class _Api extends ApiVideoService {
   int loads = 0;
+  int candidateLoads = 0;
+  @override
+  Stream<ApiVideoCandidate> candidatesForEpisode(
+    BangumiItem subject,
+    ApiVideoEpisode episode, {
+    CancelToken? cancelToken,
+  }) {
+    candidateLoads++;
+    return const Stream.empty();
+  }
+
   @override
   Future<ApiVideoCatalog> loadCatalog(
     BangumiItem subject, {

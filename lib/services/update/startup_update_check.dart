@@ -2,18 +2,16 @@ import 'dart:async';
 
 const startupUpdateCheckDelay = Duration(milliseconds: 500);
 
-/// Runs the startup update check independently from the page that scheduled it.
-///
-/// Startup pages are normally disposed as soon as they navigate to the app
-/// shell, so this work must not depend on their [State.mounted] value.
-Future<void> runStartupUpdateCheck({
-  required bool Function() isEnabled,
-  required Future<void> Function() checkForUpdate,
-  Duration delay = startupUpdateCheckDelay,
-}) async {
-  await Future<void>.delayed(delay);
-  if (!isEnabled()) {
-    return;
+/// One automatic check per application session, independent of route lifetime.
+/// A new process gets a new instance, so dismissing an update only postpones it
+/// until the next launch. Manual checks remain independent.
+class StartupUpdateCheck {
+  Future<void>? _check;
+
+  Future<void> run({
+    required Future<void> Function() checkForUpdate,
+    Duration delay = startupUpdateCheckDelay,
+  }) {
+    return _check ??= Future<void>.delayed(delay).then((_) => checkForUpdate());
   }
-  await checkForUpdate();
 }

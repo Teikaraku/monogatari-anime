@@ -31,6 +31,8 @@ import 'dart:typed_data';
 ///
 ///
 mixin HttpTrackerBase {
+  Duration get requestTimeout => const Duration(seconds: 12);
+  int get maximumResponseBytes => 2 * 1024 * 1024;
   HttpClient? _httpClient;
 
   HttpClientRequest? _request;
@@ -87,15 +89,8 @@ mixin HttpTrackerBase {
       return previousValue;
     });
     // if (_queryStr.isNotEmpty) _queryStr = _queryStr.substring(1); scrape
-    var str = _rawUrl;
-    str = '${url.origin}${url.path}?';
-    if (!str.contains('?')) str += '?';
-    str += queryStr;
-    return str;
-  }
-
-  String get _rawUrl {
-    return '${url.origin}${url.path}';
+    // Preserve tracker passkeys and routing parameters from the torrent URL.
+    return '${url.origin}${url.path}?${url.hasQuery ? url.query : ''}$queryStr';
   }
 
   ///
@@ -118,6 +113,11 @@ mixin HttpTrackerBase {
     var c = Completer<List<int>>();
     var d = <int>[];
     _sc = response?.listen((event) {
+      if (c.isCompleted) return;
+      if (d.length + event.length > maximumResponseBytes) {
+        c.completeError(const FormatException('Tracker response is too large'));
+        return;
+      }
       d.addAll(event);
     }, onDone: () {
       if (!c.isCompleted) c.complete(d);
@@ -138,21 +138,24 @@ mixin HttpTrackerBase {
       return null;
     }
     try {
-      var url = _createAccessURL(options);
-      var uri = Uri.parse(url);
-      _httpClient?.close();
-      _httpClient = HttpClient();
-      _request?.abort();
-      _request = await _httpClient?.getUrl(uri);
-      var response = await _request?.close();
-
-      var datas = await _receiveResponseData(response);
+      return await _httpGet<T>(options).timeout(requestTimeout);
+    } finally {
       await _clear();
-      return processResponseData(Uint8List.fromList(datas)) as T?;
-    } catch (e) {
-      await _clear();
-      rethrow;
     }
+  }
+
+  Future<T?> _httpGet<T>(Map<String, dynamic> options) async {
+    var uri = Uri.parse(_createAccessURL(options));
+    _httpClient?.close();
+    _httpClient = HttpClient()..connectionTimeout = requestTimeout;
+    _request?.abort();
+    _request = await _httpClient?.getUrl(uri);
+    var response = await _request?.close();
+    if (response?.statusCode != HttpStatus.ok) {
+      throw HttpException('Tracker returned HTTP ${response?.statusCode}');
+    }
+    var datas = await _receiveResponseData(response);
+    return processResponseData(Uint8List.fromList(datas)) as T?;
   }
 
   /// Process the remote response byte buffer and return the useful informations they need.

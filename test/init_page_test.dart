@@ -104,7 +104,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 600));
     final legacyRulesContent = await tester.runAsync(legacyRules.readAsString);
     expect(legacyRulesContent, 'legacy rules remain untouched');
-    expect(nextMyController.updateChecks, 0);
+    // Legacy opt-out no longer suppresses the requested check on every launch.
+    expect(nextMyController.updateChecks, 1);
     expect(GStorage.getSetting(SettingsKeys.autoUpdate), isFalse);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpAndSettle();

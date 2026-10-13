@@ -1,0 +1,192 @@
+import 'dart:async';
+import 'dart:typed_data';
+
+import 'package:dio/dio.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:kazumi/services/network/mikan_http_adapter.dart';
+
+void main() {
+  late _PlainAdapter plain;
+  late _EncryptedClient encrypted;
+  late MikanHttpAdapter adapter;
+
+  setUp(() {
+    plain = _PlainAdapter();
+    encrypted = _EncryptedClient();
+    adapter = MikanHttpAdapter(
+      fallback: plain,
+      proxyForUri: (_) => null,
+      createEchClient: () => encrypted,
+      discoveryTimeout: const Duration(milliseconds: 100),
+    );
+  });
+  tearDown(() => adapter.close(force: true));
+
+  test(
+    'Mikan direct RSS and torrent metadata use the encrypted route',
+    () async {
+      for (final path in [
+        '/RSS/MyBangumi?token=private-token',
+        '/Download/20261013/${'a' * 40}.torrent',
+      ]) {
+        final response = await adapter.fetch(_options(path), null, null);
+        expect(await response.stream.toList(), isNotEmpty);
+        expect(response.statusCode, 200);
+      }
+      expect(encrypted.requests, hasLength(2));
+      expect(plain.requests, isEmpty);
+      expect(encrypted.requests.first.followRedirects, isFalse);
+      expect(encrypted.requests.first.headers['accept'], 'test');
+    },
+  );
+
+  test('explicit proxy is preserved and never bypassed through ECH', () async {
+    final proxied = MikanHttpAdapter(
+      fallback: plain,
+      proxyForUri: (_) => Uri.parse('http://127.0.0.1:7890'),
+      createEchClient: () => encrypted,
+    );
+    addTearDown(() => proxied.close(force: true));
+    final response = await proxied.fetch(_options('/RSS/Classic'), null, null);
+    await response.stream.drain<void>();
+    expect(plain.requests, hasLength(1));
+    expect(encrypted.requests, isEmpty);
+  });
+
+  test(
+    'ECH failure falls back to normal HTTPS without exposing request secrets',
+    () async {
+      encrypted.fail = true;
+      final response = await adapter.fetch(
+        _options('/RSS/MyBangumi?token=private-token'),
+        null,
+        null,
+      );
+      expect(response.statusCode, 200);
+      await response.stream.drain<void>();
+      expect(plain.requests, hasLength(1));
+    },
+  );
+
+  test(
+    'a stalled ECH discovery is cancelled before bounded HTTPS fallback',
+    () async {
+      encrypted.waitForAbort = true;
+      final response = await adapter.fetch(
+        _options('/RSS/Classic'),
+        null,
+        null,
+      );
+      await response.stream.drain<void>();
+      expect(encrypted.aborted, isTrue);
+      expect(plain.requests, hasLength(1));
+    },
+  );
+
+  test('caller cancellation does not start a fallback request', () async {
+    encrypted.waitForAbort = true;
+    final cancellation = Completer<void>();
+    final pending = adapter.fetch(
+      _options('/RSS/MyBangumi?token=private-token'),
+      null,
+      cancellation.future,
+    );
+    await encrypted.started.future;
+    cancellation.complete();
+    await expectLater(
+      pending,
+      throwsA(
+        isA<DioException>()
+            .having((error) => error.type, 'type', DioExceptionType.cancel)
+            .having(
+              (error) => error.message,
+              'message',
+              isNot(contains('private-token')),
+            ),
+      ),
+    );
+    expect(plain.requests, isEmpty);
+  });
+
+  test(
+    'unrelated hosts and non-GET requests keep ordinary HTTP behavior',
+    () async {
+      for (final options in [
+        RequestOptions(path: 'https://example.test/file.torrent'),
+        RequestOptions(path: 'http://mikanani.me/RSS/Classic'),
+        RequestOptions(path: 'https://mikanani.me/RSS/Classic', method: 'POST'),
+      ]) {
+        final response = await adapter.fetch(options, null, null);
+        await response.stream.drain<void>();
+      }
+      expect(plain.requests, hasLength(3));
+      expect(encrypted.requests, isEmpty);
+    },
+  );
+
+  test(
+    'closing an active adapter cancels native work without fallback',
+    () async {
+      encrypted.waitForAbort = true;
+      final pending = adapter.fetch(_options('/RSS/Classic'), null, null);
+      await encrypted.started.future;
+      adapter.close(force: true);
+      await expectLater(pending, throwsA(isA<DioException>()));
+      expect(encrypted.closed, isTrue);
+      expect(encrypted.aborted, isTrue);
+      expect(plain.requests, isEmpty);
+    },
+  );
+}
+
+RequestOptions _options(String path) => RequestOptions(
+  path: 'https://mikanani.me$path',
+  followRedirects: false,
+  headers: {'accept': 'test'},
+);
+
+class _PlainAdapter implements HttpClientAdapter {
+  final requests = <RequestOptions>[];
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    requests.add(options);
+    return ResponseBody.fromString('normal HTTPS', 200);
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+class _EncryptedClient extends http.BaseClient {
+  final requests = <http.BaseRequest>[];
+  final started = Completer<void>();
+  bool fail = false;
+  bool waitForAbort = false;
+  bool aborted = false;
+  bool closed = false;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    requests.add(request);
+    if (!started.isCompleted) started.complete();
+    if (fail) throw http.ClientException('unreachable', request.url);
+    if (waitForAbort) {
+      await (request as http.Abortable).abortTrigger;
+      aborted = true;
+      throw http.RequestAbortedException();
+    }
+    return http.StreamedResponse(
+      Stream.value('encrypted HTTPS'.codeUnits),
+      200,
+    );
+  }
+
+  @override
+  void close() => closed = true;
+}
