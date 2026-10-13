@@ -61,8 +61,8 @@ jobs:
             "$RUNNER_TEMP/monogatari-release.jks" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
       - name: Build optimized APKs and app bundle
         run: |
-          flutter build apk --release --split-per-abi --no-pub
-          flutter build appbundle --release --no-pub
+          flutter build apk --release --split-per-abi
+          flutter build appbundle --release
       - name: Package release
         shell: bash
         run: |
@@ -98,7 +98,7 @@ jobs:
       - run: flutter pub get
       - name: Verify native Windows update helper
         run: flutter test test/windows_update_installer_test.dart
-      - run: flutter build windows --release --no-pub
+      - run: flutter build windows --release
       - name: Package complete executable bundle
         shell: pwsh
         run: |
@@ -139,7 +139,7 @@ jobs:
       - name: Native build tools
         run: brew list cmake ninja >/dev/null 2>&1 || brew install cmake ninja
       - run: flutter pub get
-      - run: flutter build ios --release --no-codesign --no-pub
+      - run: flutter build ios --release --no-codesign
       - name: Package unsigned IPA
         run: |
           mkdir -p dist/Payload
