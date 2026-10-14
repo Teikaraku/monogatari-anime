@@ -162,6 +162,10 @@ abstract class TorrentTask with EventsEmittable<TaskEvent> {
   /// Monogatari: avoid restricted multicast and automatic router discovery.
   void setLocalDiscoveryEnabled(bool enabled);
 
+  /// Caps what this task sends to other peers, in bytes per second. Null is
+  /// unlimited; zero keeps every peer choked so nothing is uploaded.
+  void setUploadRateLimit(int? bytesPerSecond);
+
   // Start streaming videos
   Future<void> startStreaming();
 
@@ -470,6 +474,34 @@ class _TorrentTask
     _localDiscoveryEnabled = enabled;
   }
 
+  int? _uploadRateLimit;
+  double _uploadTokens = 0;
+  final Stopwatch _uploadClock = Stopwatch()..start();
+  int _uploadTokensAt = 0;
+
+  @override
+  void setUploadRateLimit(int? bytesPerSecond) {
+    _uploadRateLimit =
+        bytesPerSecond == null || bytesPerSecond < 0 ? null : bytesPerSecond;
+    _peersManager?.uploadsDisabled = _uploadRateLimit == 0;
+  }
+
+  /// A token bucket holding at most one second of uploads (and at least one
+  /// block). Requests beyond it are left unanswered; peers re-request them.
+  bool _takeUploadBudget(int length) {
+    final limit = _uploadRateLimit;
+    if (limit == null) return true;
+    if (limit == 0) return false;
+    final now = _uploadClock.elapsedMicroseconds;
+    final capacity = limit > length ? limit.toDouble() : length.toDouble();
+    _uploadTokens += (now - _uploadTokensAt) * limit / 1000000;
+    if (_uploadTokens > capacity) _uploadTokens = capacity;
+    _uploadTokensAt = now;
+    if (_uploadTokens < length) return false;
+    _uploadTokens -= length;
+    return true;
+  }
+
   Object? _stateFile; // Can be StateFile or StateFileV2
 
   @override
@@ -736,6 +768,7 @@ class _TorrentTask
     _fileManager ??= await DownloadFileManager.createFileManager(
         model, savePath, _stateFile!, _pieceManager!.pieces.values.toList());
     _peersManager ??= PeersManager(_peerId, model, ipFilter: _ipFilter);
+    _peersManager?.uploadsDisabled = _uploadRateLimit == 0;
     _peersManager?.setSSLConfig(_sslConfig);
     _peersManager?.setProtocolEncryptionConfig(_encryptionConfig);
     _advancedSelector?.setLocalPeerEndpoint(
@@ -1650,7 +1683,8 @@ class _TorrentTask
   void _processPeerRequest(PeerRequestEvent event) {
     if (_fileManager == null ||
         _peersManager == null ||
-        _peersManager!.isPaused) {
+        _peersManager!.isPaused ||
+        !_takeUploadBudget(event.length)) {
       return;
     }
     _fileManager!.readFile(event.index, event.begin, event.length);

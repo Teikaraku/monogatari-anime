@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:dio/io.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/services/network/proxy_utils.dart';
+import 'package:kazumi/services/network/public_dns_resolver.dart';
 import 'package:kazumi/services/network/system_proxy_service.dart';
 import 'package:kazumi/services/storage/storage.dart';
 
@@ -39,9 +40,40 @@ class NetworkConfig {
   }
 
   IOHttpClientAdapter createAdapter() {
+    final resolver = PublicDnsResolver(proxyForUri: proxyForUri);
     return IOHttpClientAdapter(
       createHttpClient: () {
         final client = HttpClient();
+        // Restrict DNS recovery to known public APIs; personal WebDAV and LAN
+        // endpoints keep their existing local DNS and proxy semantics.
+        client.connectionFactory = (uri, proxyHost, proxyPort) async {
+          if (proxyHost != null)
+            return Socket.startConnect(proxyHost, proxyPort!);
+          if (!const {
+            'bgm.monogatari.top',
+            'api.github.com',
+            'api.yzzy-api.com',
+            'bfzyapi.com',
+            'cj.lziapi.com',
+          }.contains(uri.host)) {
+            return uri.scheme == 'https'
+                ? SecureSocket.startConnect(
+                    uri.host,
+                    uri.port,
+                    onBadCertificate: allowBadCertificates ? (_) => true : null,
+                  )
+                : Socket.startConnect(uri.host, uri.port);
+          }
+          final addresses = await resolver.lookup(uri.host);
+          final opening = publicConnectionTask(addresses, uri.port);
+          return uri.scheme == 'https'
+              ? verifiedTlsConnectionTask(
+                  opening,
+                  uri.host,
+                  onBadCertificate: allowBadCertificates ? (_) => true : null,
+                )
+              : opening;
+        };
         if (hasProxy) {
           client.findProxy = (_) => 'PROXY $proxyHost:$proxyPort';
         } else if (Platform.isWindows) {

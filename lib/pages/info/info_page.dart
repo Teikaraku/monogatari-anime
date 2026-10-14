@@ -20,7 +20,6 @@ import 'package:kazumi/pages/info/info_catalog_prefetch.dart';
 import 'package:kazumi/pages/info/info_controller.dart';
 import 'package:kazumi/pages/info/info_tabview.dart';
 import 'package:kazumi/pages/video/video_playback_args.dart';
-import 'package:kazumi/services/api_video/api_video_service.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/services/platform/desktop_window_config.dart';
 import 'package:kazumi/services/storage/storage.dart';
@@ -48,12 +47,9 @@ class _InfoPageState extends State<InfoPage>
   );
 
   InfoController get infoController => widget.infoController;
-  late final _catalogPrefetch = InfoCatalogPrefetch(
-    (subject, cancellation) => inject<ApiVideoService>().prefetchCatalog(
-      subject,
-      cancelToken: cancellation,
-    ),
-  );
+  // Detail browsing does not contact playback providers. Resolve their
+  // catalogs only after the user explicitly plays or downloads online video.
+  late final _catalogPrefetch = InfoCatalogPrefetch();
   late int _subjectRevision;
   late final TabController infoTabController;
   late final bool showRating;
@@ -330,14 +326,6 @@ class _InfoPageState extends State<InfoPage>
                   ),
                 ),
                 actions: [
-                  IconButton(
-                    tooltip: 'RSS 订阅与播放',
-                    icon: const Icon(Icons.rss_feed_rounded),
-                    onPressed: () => context.pushNamed(
-                      '/subscriptions/',
-                      arguments: infoController.bangumiItem,
-                    ),
-                  ),
                   if (innerBoxIsScrolled)
                     EmbeddedNativeControlArea(
                       child: CollectButton(

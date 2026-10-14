@@ -43,8 +43,9 @@ class M3u8AdFilter {
 
       bool isAd = false;
 
-      // Short segments relative to main content (< 30%)
-      if (groupDuration < maxDuration * 0.3) {
+      // A discontinuity can split genuine content into two long chapters.
+      // Relative size alone must never remove several minutes of the episode.
+      if (groupDuration <= 60 && groupDuration < maxDuration * 0.15) {
         isAd = true;
       }
 
@@ -70,6 +71,49 @@ class M3u8AdFilter {
     return segments
         .where((seg) => !adGroups.contains(seg.discontinuityGroup))
         .toList();
+  }
+
+  /// Preserve the original playlist metadata and original AES sequence IVs.
+  /// Byte-range playlists retain their layout because omitted implicit byte
+  /// offsets require a separate remuxing step rather than simple filtering.
+  static String filterPlaylist(String content, String baseUrl) {
+    if (M3u8Parser.detectType(content) == M3u8Type.master ||
+        content.contains('#EXT-X-BYTERANGE'))
+      return content;
+    final parsed = M3u8Parser.parseMediaPlaylist(content, baseUrl);
+    final retained = filterAds(parsed.segments).toSet();
+    if (retained.length == parsed.segments.length) return content;
+    final lines = content.split('\n');
+    final out = <String>[];
+    var index = 0;
+    var skipping = false;
+    String? currentMap;
+    String? writtenMap;
+    for (final line in lines) {
+      final text = line.trim();
+      if (text.startsWith('#EXT-X-KEY:')) continue;
+      if (text.startsWith('#EXT-X-MAP:')) {
+        currentMap = line;
+        continue;
+      }
+      if (text.startsWith('#EXTINF:')) {
+        skipping = !retained.contains(parsed.segments[index]);
+        if (skipping) continue;
+        if (currentMap != null && currentMap != writtenMap) {
+          out.add(currentMap);
+          writtenMap = currentMap;
+        }
+        final key = parsed.segments[index].key;
+        out.add(key?.toString() ?? '#EXT-X-KEY:METHOD=NONE');
+      } else if (text.isNotEmpty && !text.startsWith('#')) {
+        if (!skipping) out.add(line);
+        index++;
+        skipping = false;
+        continue;
+      }
+      if (!skipping || text.startsWith('#EXT-X-DISCONTINUITY')) out.add(line);
+    }
+    return out.join('\n');
   }
 
   /// Calculate the new target duration after filtering

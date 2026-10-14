@@ -31,6 +31,10 @@ class DartTorrentEngine implements TorrentEngine {
   final bool allowLoopbackPeers;
   final String? Function(Uri)? metadataProxy;
   final TorrentWorkerSpawner? workerSpawner;
+
+  /// Upload cap in bytes per second, read when a task opens and on every
+  /// snapshot so a changed setting applies within a second. Null is unlimited.
+  final int? Function()? uploadLimit;
   Isolate? _isolate;
   SendPort? _port;
   ReceivePort? _receive;
@@ -46,6 +50,7 @@ class DartTorrentEngine implements TorrentEngine {
     this.allowLoopbackPeers = false,
     this.metadataProxy,
     this.workerSpawner,
+    this.uploadLimit,
   });
 
   Future<void> _start() => _starting ??= _spawn().catchError((Object error) {
@@ -183,6 +188,7 @@ class DartTorrentEngine implements TorrentEngine {
       'bytes': metadata.bytes,
       'directory': directory.path,
       'allowNetwork': allowNetwork,
+      'uploadLimit': uploadLimit?.call(),
     }, cancelToken: cancelToken);
     if (generation != _generation) throw StateError('BT 后台引擎已停止，请重试');
     return _DartTorrentHandle(this, metadata.infoHash, generation);
@@ -226,7 +232,9 @@ class _DartTorrentHandle implements TorrentEngineHandle {
 
   @override
   Future<TorrentEngineSnapshot> snapshot() async {
-    final map = await call('snapshot') as Map;
+    final map =
+        await call('snapshot', {'uploadLimit': engine.uploadLimit?.call()})
+            as Map;
     return TorrentEngineSnapshot(
       files: (map['files'] as List)
           .map(
@@ -362,6 +370,7 @@ class _TorrentWorker {
         directory,
         allowLoopbackPeers,
         offline: args['allowNetwork'] == false,
+        uploadLimit: args['uploadLimit'] as int?,
       );
       await task.start(token);
       tasks[args['hash'] as String] = task;
@@ -378,6 +387,7 @@ class _TorrentWorker {
     if (task == null) throw StateError('Torrent task does not exist');
     switch (command) {
       case 'snapshot':
+        task.applyUploadLimit(args['uploadLimit'] as int?);
         return task.snapshot();
       case 'download':
         task.downloads = Set<int>.from(args['files'] as List);
@@ -663,6 +673,8 @@ class _WorkerTask {
   final bool allowLoopbackPeers;
   final bool offline;
   late bt.TorrentTask task;
+  bool _created = false;
+  int? uploadLimit;
   Set<int> downloads = {};
   final readers = <String, (int, int)>{};
   bool paused = false;
@@ -683,7 +695,14 @@ class _WorkerTask {
     this.directory,
     this.allowLoopbackPeers, {
     this.offline = false,
+    this.uploadLimit,
   });
+
+  void applyUploadLimit(int? value) {
+    if (value == uploadLimit) return;
+    uploadLimit = value;
+    if (_created) task.setUploadRateLimit(value);
+  }
 
   Future<void> start(CancelToken token) async {
     // Validate persisted pieces before the scheduler trusts the resume bitfield.
@@ -709,7 +728,9 @@ class _WorkerTask {
     throwIfTorrentCancelled(token);
     if (offline) return;
     task = bt.TorrentTask.newTask(model, directory.path, true);
+    _created = true;
     task.setLocalDiscoveryEnabled(false);
+    task.setUploadRateLimit(uploadLimit);
     Object? startupError;
     final starting = task
         .start(startPaused: true, allowLoopbackPeers: allowLoopbackPeers)

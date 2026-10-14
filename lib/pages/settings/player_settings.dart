@@ -48,6 +48,7 @@ class _PlayerSettingsPageState extends State<PlayerSettingsPage> {
   late bool rssDownloadWhilePlaying;
   late bool rssFallbackToApi;
   late bool rssWifiOnly;
+  late int rssUploadLimit;
 
   @override
   void initState() {
@@ -62,6 +63,7 @@ class _PlayerSettingsPageState extends State<PlayerSettingsPage> {
     );
     rssFallbackToApi = GStorage.getSetting<bool>(SettingsKeys.rssFallbackToApi);
     rssWifiOnly = GStorage.getSetting<bool>(SettingsKeys.rssWifiOnly);
+    rssUploadLimit = GStorage.getSetting<int>(SettingsKeys.rssUploadLimit);
     defaultPlaySpeed = GStorage.getSetting<double>(
       SettingsKeys.defaultPlaySpeed,
     );
@@ -340,6 +342,27 @@ class _PlayerSettingsPageState extends State<PlayerSettingsPage> {
                     enabled,
                   );
                   if (mounted) setState(() => rssWifiOnly = enabled);
+                },
+              ),
+              SettingsDropdownTile<int>(
+                leading: Icons.upload_rounded,
+                title: const Text('上传限速'),
+                description: const Text('边下边播时分享给其他用户的速度'),
+                value: rssUploadLimit,
+                options: const {
+                  0: '不上传',
+                  64: '64 KB/s',
+                  256: '256 KB/s',
+                  1024: '1 MB/s',
+                  -1: '不限制',
+                },
+                fallbackLabel: '64 KB/s',
+                onChanged: (value) async {
+                  await GStorage.putSetting<int>(
+                    SettingsKeys.rssUploadLimit,
+                    value,
+                  );
+                  if (mounted) setState(() => rssUploadLimit = value);
                 },
               ),
               SettingsTile(

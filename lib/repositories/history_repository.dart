@@ -6,6 +6,7 @@ import 'package:kazumi/modules/history/history_module.dart';
 import 'package:kazumi/services/sync/history_sync_service.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/services/storage/history_storage_coordinator.dart';
+import 'package:kazumi/services/api_video/episode_identity.dart';
 
 typedef HistoryProgressSyncAppender =
     Future<void> Function({
@@ -221,7 +222,10 @@ class HistoryRepository implements IHistoryRepository {
           return;
         }
 
-        final episode = identity.episodeNumber;
+        final episode = episodeHistorySlot(
+          identity.episodePageUrl,
+          identity.episodeNumber,
+        );
         final adapterName = identity.pluginName;
         final bangumiItem = identity.bangumiItem;
 
@@ -268,15 +272,23 @@ class HistoryRepository implements IHistoryRepository {
           // progress and move an existing matching identity into this slot.
           MapEntry<int, Progress>? matching;
           for (final entry in history.progresses.entries) {
-            if (entry.value.episodePageUrl == identity.episodePageUrl) {
+            if (canonicalEpisodePageUrl(entry.value.episodePageUrl) ==
+                canonicalEpisodePageUrl(identity.episodePageUrl) ||
+                identity.legacyEpisodePageUrls.contains(entry.value.episodePageUrl)) {
               matching = entry;
               break;
             }
           }
           if (prog != null &&
+              !identical(prog, matching?.value) &&
               prog.episodePageUrl.startsWith('monogatari://episode/') &&
-              prog.episodePageUrl != identity.episodePageUrl) {
-            var spareSlot = episode + 1;
+              canonicalEpisodePageUrl(prog.episodePageUrl) !=
+                  canonicalEpisodePageUrl(identity.episodePageUrl)) {
+            var spareSlot = episodeHistorySlot(
+              prog.episodePageUrl,
+              episode + 1,
+            );
+            if (spareSlot == episode) spareSlot = 1000000;
             while (history.progresses.containsKey(spareSlot)) {
               spareSlot++;
             }
@@ -289,6 +301,9 @@ class HistoryRepository implements IHistoryRepository {
             history.progresses.remove(matching.key);
             prog = matching.value..episode = episode;
             history.progresses[episode] = prog;
+            prog.episodePageUrl = canonicalEpisodePageUrl(
+              identity.episodePageUrl,
+            );
           }
         }
         if (prog == null) {

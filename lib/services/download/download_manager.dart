@@ -40,6 +40,7 @@ class DownloadTask {
   bool isPaused;
   bool isStorageFailure = false;
   bool suppressSourceFailure = false;
+  bool publicNetworkOnly = false;
 
   DownloadTask({
     required this.recordKey,
@@ -88,6 +89,7 @@ class DownloadRequest {
   final String m3u8Url;
   final Map<String, String> httpHeaders;
   final bool adBlockerEnabled;
+  final bool publicNetworkOnly;
   final DownloadEpisode episode;
   final VideoSourceFormat sourceFormat;
 
@@ -104,6 +106,7 @@ class DownloadRequest {
     required this.m3u8Url,
     required this.httpHeaders,
     required this.adBlockerEnabled,
+    this.publicNetworkOnly = false,
     required this.episode,
     this.sourceFormat = VideoSourceFormat.auto,
     this.resolveNextCandidate,
@@ -463,6 +466,7 @@ class DownloadManager implements IDownloadManager {
           m3u8Url: request.m3u8Url,
           httpHeaders: request.httpHeaders,
           adBlockerEnabled: request.adBlockerEnabled,
+          publicNetworkOnly: request.publicNetworkOnly,
           sourceFormat: request.sourceFormat,
           episode: episode,
         );
@@ -514,6 +518,7 @@ class DownloadManager implements IDownloadManager {
     required String m3u8Url,
     required Map<String, String> httpHeaders,
     required bool adBlockerEnabled,
+    bool publicNetworkOnly = false,
     required VideoSourceFormat sourceFormat,
     required DownloadEpisode episode,
   }) async {
@@ -527,6 +532,7 @@ class DownloadManager implements IDownloadManager {
       );
 
       episode.status = DownloadStatus.downloading;
+      task.publicNetworkOnly = publicNetworkOnly;
       episode.networkM3u8Url = m3u8Url;
       _notifyProgress(task, episode);
 
@@ -618,6 +624,7 @@ class DownloadManager implements IDownloadManager {
       );
       final keyUriToLocal = <String, String>{};
       for (int i = 0; i < keys.length; i++) {
+        if (keyUriToLocal.containsKey(keys[i].uri)) continue;
         final keyFile = 'key_$i.key';
         final keyPath = path.join(episodeDir, keyFile);
         await _downloadFile(
@@ -844,6 +851,7 @@ class DownloadManager implements IDownloadManager {
           headers: requestHeaders,
           receiveTimeout: const Duration(minutes: 30),
           cancelToken: task.cancelToken,
+          publicNetworkOnly: task.publicNetworkOnly,
         );
       } on NetworkException catch (e) {
         if (e.statusCode == 416 && useRange) {
@@ -858,6 +866,7 @@ class DownloadManager implements IDownloadManager {
             headers: requestHeaders,
             receiveTimeout: const Duration(minutes: 30),
             cancelToken: task.cancelToken,
+            publicNetworkOnly: task.publicNetworkOnly,
           );
         } else {
           rethrow;
@@ -1044,6 +1053,7 @@ class DownloadManager implements IDownloadManager {
             fetchToken.cancel('too large');
           }
         },
+        publicNetworkOnly: _publicTask(cancelToken),
       );
 
       final trimmed = content.trimLeft();
@@ -1072,8 +1082,12 @@ class DownloadManager implements IDownloadManager {
       savePath,
       headers: headers,
       cancelToken: cancelToken,
+      publicNetworkOnly: _publicTask(cancelToken),
     );
   }
+
+  bool _publicTask(CancelToken token) => _activeTasks.values.any((task) =>
+      identical(task.cancelToken, token) && task.publicNetworkOnly);
 
   Future<int> _downloadSegmentWithRetry(
     String url,
@@ -1091,6 +1105,7 @@ class DownloadManager implements IDownloadManager {
           tmpPath,
           headers: headers,
           cancelToken: cancelToken,
+          publicNetworkOnly: _publicTask(cancelToken),
         );
         if (cancelToken.isCancelled) {
           throw const NetworkException(

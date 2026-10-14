@@ -69,6 +69,8 @@ class PreparedWindowsUpdate {
     if (!Platform.isWindows) {
       throw UnsupportedError('Windows 更新安装器仅用于 Windows');
     }
+    // A detached PowerShell has no console and exits before running the
+    // script. An attached child still outlives the app, which exits next.
     await Process.start('powershell.exe', [
       '-NoProfile',
       '-NonInteractive',
@@ -80,13 +82,14 @@ class PreparedWindowsUpdate {
       scriptPath,
       '-ConfigPath',
       configPath,
-    ], mode: ProcessStartMode.detached);
+    ]);
   }
 }
 
 const windowsUpdateScript = r'''
 param([Parameter(Mandatory=$true)][string]$ConfigPath)
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $configuration = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $appDirectory = [IO.Path]::GetFullPath($configuration.appDirectory).TrimEnd('\')
 $stagingDirectory = [IO.Path]::GetFullPath($configuration.stagingDirectory).TrimEnd('\')

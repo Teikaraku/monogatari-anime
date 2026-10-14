@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/modules/bangumi/bangumi_tag.dart';
 import 'package:kazumi/modules/history/history_module.dart';
+import 'package:kazumi/services/api_video/episode_identity.dart';
 
 enum HistorySyncOp {
   upsertProgress('upsertProgress'),
@@ -24,30 +25,31 @@ enum HistorySyncOp {
 }
 
 String? _stableApiEpisodeUrl(String? value) =>
-    value?.startsWith('monogatari://episode/') == true ? value : null;
+    value?.startsWith('monogatari://episode/') == true
+      ? canonicalEpisodePageUrl(value!) : null;
 
 /// List positions and offline download slots can differ on two devices.
 /// Preserve each API episode's identity while retaining integer wire slots
 /// for old clients and rule-based history.
 int _stableProgressSlot(History history, HistorySyncEvent event) {
-  final requested = event.episode!;
+  final requested = episodeHistorySlot(event.episodePageUrl ?? '', event.episode!);
   final identity = _stableApiEpisodeUrl(event.episodePageUrl);
   if (identity == null) return requested;
   for (final entry in history.progresses.entries) {
-    if (entry.value.episodePageUrl == identity) return entry.key;
+    if (_stableApiEpisodeUrl(entry.value.episodePageUrl) == identity) return entry.key;
   }
   final watchIdentity = _stableApiEpisodeUrl(history.episodePageUrl);
   final watchSlot = history.lastWatchEpisode;
   if (watchIdentity == identity &&
       (history.progresses[watchSlot] == null ||
-          history.progresses[watchSlot]!.episodePageUrl == identity)) {
+          _stableApiEpisodeUrl(history.progresses[watchSlot]!.episodePageUrl) == identity)) {
     return watchSlot;
   }
   final occupied = history.progresses[requested];
   final conflictsWithProgress =
       occupied != null &&
       _stableApiEpisodeUrl(occupied.episodePageUrl) != null &&
-      occupied.episodePageUrl != identity;
+      _stableApiEpisodeUrl(occupied.episodePageUrl) != identity;
   final conflictsWithWatch =
       requested == watchSlot &&
       watchIdentity != null &&

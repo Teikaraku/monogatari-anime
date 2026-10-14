@@ -3,10 +3,17 @@ import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_modular/flutter_modular.dart';
-import 'package:kazumi/bean/appbar/sys_app_bar.dart';
+import 'package:kazumi/bean/card/network_img_layer.dart';
 import 'package:kazumi/bean/dialog/adaptive_bottom_sheet.dart';
+import 'package:kazumi/bean/dialog/material_bottom_sheet.dart';
+import 'package:kazumi/bean/settings/settings_detail_scaffold.dart';
+import 'package:kazumi/bean/settings/settings_list.dart';
 import 'package:kazumi/bean/widget/empty_state_widget.dart';
+import 'package:kazumi/bean/widget/kazumi_menu.dart';
+import 'package:kazumi/bean/widget/loading_indicator.dart';
+import 'package:kazumi/bean/widget/split_list_row.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
+import 'package:kazumi/pages/subscriptions/rss_widgets.dart';
 import 'package:kazumi/pages/video/video_playback_args.dart';
 import 'package:kazumi/request/apis/bangumi_api.dart';
 import 'package:kazumi/services/download/background_download_service.dart';
@@ -14,6 +21,7 @@ import 'package:kazumi/services/rss/rss_subscription_service.dart';
 import 'package:kazumi/services/torrent/torrent_service.dart';
 import 'package:kazumi/services/torrent/torrent_models.dart';
 import 'package:kazumi/utils/format.dart';
+import 'package:kazumi/utils/theme.dart';
 
 /// Subscriptions are application-owned; this route owns only its UI requests.
 class SubscriptionsPage extends StatefulWidget {
@@ -39,6 +47,9 @@ class _SubscriptionsPageState extends State<SubscriptionsPage> {
   String? _error;
   MikanShow? _show;
   bool _initialized = false;
+
+  /// Releases published after this are marked new on this visit.
+  DateTime? _newSince;
   StreamSubscription<TorrentCapability>? _capabilitySubscription;
   Future<void>? _torrentInitialization;
   TorrentService? _torrentInitializationService;
@@ -86,6 +97,8 @@ class _SubscriptionsPageState extends State<SubscriptionsPage> {
       _initialized = true;
       final subject = widget.subject;
       if (subject != null) {
+        _newSince = widget.service.newSince(subject.id);
+        unawaited(widget.service.markViewed(subject.id));
         final subscriptions = widget.service.subscriptions.where(
           (item) => item.bangumiId == subject.id,
         );
@@ -246,7 +259,13 @@ class _SubscriptionsPageState extends State<SubscriptionsPage> {
     if (subject == null || show == null) return;
     final group = await showAdaptiveBottomSheet<MikanSubtitleGroup>(
       context: context,
-      builder: (context) => _GroupSelection(show: show),
+      builder: (context) => _GroupSelection(
+        show: show,
+        subscribed: {
+          for (final item in widget.service.subscriptions)
+            if (item.bangumiId == subject.id) item.subtitleGroupId,
+        },
+      ),
     );
     if (group == null || !mounted) return;
     await _run('正在订阅 ${group.name}', (token) async {
@@ -329,9 +348,7 @@ class _SubscriptionsPageState extends State<SubscriptionsPage> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除订阅'),
-        content: Text(
-          '取消 ${subscription.title} · ${subscription.subtitleGroupName} 的更新订阅？已有磁力任务和文件会保留。',
-        ),
+        content: Text('不再接收 ${subscription.subtitleGroupName} 的更新，已下载的文件会保留。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -356,32 +373,8 @@ class _SubscriptionsPageState extends State<SubscriptionsPage> {
     if (release.isBatch) {
       episode = await showAdaptiveBottomSheet<double>(
         context: context,
-        builder: (context) => SizedBox(
-          height: 400,
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Text(
-                  '选择话数',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-              ),
-              Expanded(
-                child: ListView(
-                  children: [
-                    for (final number in release.episodeNumbers)
-                      ListTile(
-                        title: Text('第 ${_episodeLabel(number)} 话'),
-                        trailing: const Icon(Icons.play_arrow),
-                        onTap: () => Navigator.pop(context, number),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
+        builder: (context) =>
+            _EpisodeNumberSheet(numbers: release.episodeNumbers),
       );
       if (episode == null || !mounted) return;
     }
@@ -444,350 +437,907 @@ class _SubscriptionsPageState extends State<SubscriptionsPage> {
     }
   }
 
+  Future<void> _select(RssSubscription subscription) => _run(
+    '正在切换字幕组',
+    (_) => widget.service.selectSubscription(subscription.id),
+  );
+
+  Future<void> _setEnabled(RssSubscription subscription, bool enabled) => _run(
+    enabled ? '正在恢复更新' : '正在暂停更新',
+    (_) => widget.service.setEnabled(subscription.id, enabled),
+  );
+
+  Future<void> _refreshOne(RssSubscription subscription) => _run(
+    '正在刷新 ${subscription.subtitleGroupName}',
+    (token) => widget.service.refresh(
+      subscriptionId: subscription.id,
+      cancelToken: token,
+    ),
+  );
+
+  void _openTasks() => unawaited(
+    context.pushNamed('/torrent-tasks/', arguments: widget.subject?.id),
+  );
+
+  bool get _torrentReady {
+    final capability = widget.torrentService.capability;
+    return capability.supported && capability.ready;
+  }
+
   @override
   Widget build(BuildContext context) {
     final subject = widget.subject;
-    return Scaffold(
-      appBar: SysAppBar(
-        title: Text(subject == null ? 'RSS 订阅' : 'RSS 资源与订阅'),
-        actions: [
-          IconButton(
-            tooltip: '刷新订阅',
-            onPressed: _busy == null
-                ? () => _run('正在刷新订阅', _refreshSubject)
-                : null,
-            icon: const Icon(Icons.refresh_rounded),
-          ),
-          if (subject == null)
-            IconButton(
-              tooltip: '添加订阅',
-              onPressed: _busy == null ? _addSubject : null,
-              icon: const Icon(Icons.add_rounded),
-            ),
-        ],
-      ),
-      body: AnimatedBuilder(
-        animation: widget.service,
-        builder: (context, _) {
-          final subscriptions = widget.service.subscriptions
-              .where((item) => subject == null || item.bangumiId == subject.id)
-              .toList();
-          final releases = subject == null
-              ? const <RssRelease>[]
-              : widget.service.releasesForSubject(subject.id);
-          return Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 1000),
-              child: Column(
-                children: [
-                  if (_busy != null)
-                    _LoadingRow(label: _busy!, onCancel: _cancel),
-                  if (_error != null || widget.service.lastError != null)
-                    _ErrorRow(
-                      message: _error ?? widget.service.lastError!,
-                      onRetry: _busy == null ? _initialize : null,
-                    ),
-                  if (_torrentError != null)
-                    _ErrorRow(
-                      message: _torrentError!,
-                      onRetry: _torrentInitialization == null
-                          ? () => unawaited(_initializeTorrent())
-                          : null,
-                    ),
-                  Expanded(
-                    child: !_initialized && _busy != null
-                        ? const Center(child: CircularProgressIndicator())
-                        : subject == null
-                        ? _subscriptionList(subscriptions)
-                        : _subjectResources(subject, subscriptions, releases),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _subscriptionList(List<RssSubscription> subscriptions) {
-    if (subscriptions.isEmpty) {
-      return GeneralEmptyState(
-        icon: Icons.rss_feed_rounded,
-        title: '还没有 RSS 订阅',
-        actions: [
-          FilledButton.icon(
-            onPressed: _busy == null ? _addSubject : null,
-            icon: const Icon(Icons.add),
-            label: const Text('添加番组订阅'),
-          ),
-        ],
-      );
-    }
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: subscriptions.map(_subscriptionCard).toList(),
-    );
-  }
-
-  Widget _subjectResources(
-    BangumiItem subject,
-    List<RssSubscription> subscriptions,
-    List<RssRelease> releases,
-  ) {
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Text(
-          subject.nameCn.isNotEmpty ? subject.nameCn : subject.name,
-          style: Theme.of(context).textTheme.headlineSmall,
+    final idle = _busy == null;
+    return SettingsDetailScaffold(
+      title: Text(subject == null ? 'RSS 订阅' : 'RSS 资源'),
+      actions: [
+        IconButton(
+          tooltip: '刷新订阅',
+          onPressed: idle ? () => _run('正在刷新订阅', _refreshSubject) : null,
+          icon: const Icon(Icons.refresh_rounded),
         ),
-        const SizedBox(height: 12),
-        if (_show != null)
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+        if (subject == null) ...[
+          IconButton(
+            tooltip: '磁力任务',
+            onPressed: _openTasks,
+            icon: const Icon(Icons.hub_rounded),
+          ),
+          IconButton(
+            tooltip: '添加订阅',
+            onPressed: idle ? _addSubject : null,
+            icon: const Icon(Icons.add_rounded),
+          ),
+        ] else
+          KazumiMenuButton(
+            menuChildren: [
+              KazumiMenuItem(
+                label: '重新匹配番组',
+                leadingIcon: const Icon(Icons.search_rounded),
+                onPressed: idle ? _searchShow : null,
+              ),
+              KazumiMenuItem(
+                label: '添加 RSS 地址',
+                leadingIcon: const Icon(Icons.link_rounded),
+                onPressed: idle ? _addFeed : null,
+              ),
+              KazumiMenuItem(
+                label: '磁力任务',
+                leadingIcon: const Icon(Icons.hub_rounded),
+                onPressed: _openTasks,
+              ),
+            ],
+            builder: (context, toggle) => IconButton(
+              tooltip: '更多',
+              onPressed: toggle,
+              icon: const Icon(Icons.more_horiz_rounded),
+            ),
+          ),
+      ],
+      body: MonoGroupedScope(
+        grouped: true,
+        child: AnimatedBuilder(
+          animation: widget.service,
+          builder: (context, _) {
+            final subscriptions = widget.service.subscriptions
+                .where(
+                  (item) => subject == null || item.bangumiId == subject.id,
+                )
+                .toList();
+            final banners = _banners();
+            if (!_initialized && _busy != null) {
+              return _Column(
                 children: [
-                  Text(
-                    _show!.title,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const SizedBox(height: 8),
-                  const Text('蜜柑番组已与当前季度确认匹配'),
-                  const SizedBox(height: 12),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      FilledButton.icon(
-                        onPressed: _busy == null ? _chooseGroup : null,
-                        icon: const Icon(Icons.group_outlined),
-                        label: Text(
-                          subscriptions.isEmpty ? '选择字幕组并订阅' : '添加字幕组',
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: _busy == null ? _searchShow : null,
-                        child: const Text('重新选择番组'),
-                      ),
-                    ],
+                  ...banners,
+                  const SizedBox(
+                    height: 240,
+                    child: Center(child: LoadingIndicator()),
                   ),
                 ],
-              ),
-            ),
-          )
-        else if (_busy == null)
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('未找到与当前季度确认匹配的蜜柑番组'),
-                  const SizedBox(height: 12),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      FilledButton.icon(
-                        onPressed: _searchShow,
-                        icon: const Icon(Icons.search),
-                        label: const Text('搜索番组'),
+              );
+            }
+            if (subject == null) {
+              if (subscriptions.isEmpty) {
+                return _Column(
+                  scrollable: false,
+                  children: [
+                    ...banners,
+                    Expanded(
+                      child: GeneralEmptyState(
+                        icon: Icons.rss_feed_rounded,
+                        title: '还没有 RSS 订阅',
+                        actions: [
+                          FilledButton.icon(
+                            onPressed: idle ? _addSubject : null,
+                            icon: const Icon(Icons.add_rounded),
+                            label: const Text('添加订阅'),
+                          ),
+                        ],
                       ),
-                      TextButton(
-                        onPressed: _addFeed,
-                        child: const Text('添加 RSS 地址'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
+                    ),
+                  ],
+                );
+              }
+              return _Column(children: [...banners, _overview(subscriptions)]);
+            }
+            return _Column(
+              children: [
+                ...banners,
+                _SubjectHeader(subject: subject, show: _show),
+                const SizedBox(height: 24),
+                ..._groupSection(subscriptions),
+                const SizedBox(height: 24),
+                ..._releaseSection(
+                  subscriptions,
+                  widget.service.releasesForSubject(subject.id),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _banners() {
+    final capability = widget.torrentService.capability;
+    final error = _error ?? widget.service.lastError;
+    return [
+      if (_busy != null)
+        RssBanner(
+          message: _busy!,
+          tone: RssBannerTone.progress,
+          actionLabel: '取消',
+          onAction: _cancel,
+        ),
+      if (error != null)
+        RssBanner(
+          message: error,
+          tone: RssBannerTone.error,
+          actionLabel: '重试',
+          onAction: _busy == null ? _initialize : null,
+        ),
+      if (_torrentError != null)
+        RssBanner(
+          message: _torrentError!,
+          tone: RssBannerTone.error,
+          actionLabel: '重试',
+          onAction: _torrentInitialization == null
+              ? () => unawaited(_initializeTorrent())
+              : null,
+        )
+      else if (widget.subject != null &&
+          (!capability.supported || !capability.ready))
+        RssBanner(
+          message:
+              capability.unavailableReason ??
+              (_torrentInitialization != null ? '正在准备磁力播放' : '磁力引擎暂不可用'),
+          tone: RssBannerTone.info,
+        ),
+    ];
+  }
+
+  /// One row per show; the show's page manages its subtitle groups.
+  Widget _overview(List<RssSubscription> subscriptions) {
+    final byShow = <int, List<RssSubscription>>{};
+    for (final subscription in subscriptions) {
+      byShow.putIfAbsent(subscription.bangumiId, () => []).add(subscription);
+    }
+    final palette = MonoPalette.of(context);
+    final colors = Theme.of(context).colorScheme;
+    return RssGroup(
+      dividerIndent: 16 + 44 + 12,
+      children: [
+        for (final group in byShow.values)
+          Builder(
+            builder: (context) {
+              final first = group.first;
+              final failed = group.any((item) => item.lastError != null);
+              final paused = group.every((item) => !item.enabled);
+              final refreshed = group
+                  .map((item) => item.lastRefreshedAt)
+                  .whereType<DateTime>()
+                  .fold<DateTime?>(
+                    null,
+                    (a, b) => a == null || b.isAfter(a) ? b : a,
+                  );
+              final fresh = widget.service.newReleaseCount(first.bangumiId);
+              return RssRow(
+                leading: _Cover(subject: first.subject, width: 44),
+                title: first.title,
+                titleWeight: FontWeight.w500,
+                subtitle: group
+                    .map((item) => item.subtitleGroupName)
+                    .join(' · '),
+                detail: failed
+                    ? '更新失败'
+                    : paused
+                    ? '已暂停更新'
+                    : fresh > 0
+                    ? '$fresh 个新资源'
+                    : refreshed == null
+                    ? null
+                    : '${rssShortDate(refreshed, withTime: true)} 刷新',
+                detailColor: failed
+                    ? colors.error
+                    : !paused && fresh > 0
+                    ? colors.primary
+                    : null,
+                trailing: Icon(
+                  Icons.chevron_right_rounded,
+                  color: palette.tertiaryLabel,
+                ),
+                onTap: () => context.pushNamed(
+                  '/subscriptions/',
+                  arguments: first.subject,
+                ),
+              );
+            },
           ),
-        for (final subscription in subscriptions)
-          _subscriptionCard(subscription),
-        if (_show != null)
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
-              onPressed: _busy == null ? _addFeed : null,
-              icon: const Icon(Icons.link),
-              label: const Text('添加字幕组 RSS 地址'),
-            ),
-          ),
-        const SizedBox(height: 16),
-        Text('更新资源', style: Theme.of(context).textTheme.titleLarge),
-        const SizedBox(height: 8),
-        if (releases.isEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 24),
-            child: Text(
-              subscriptions.isEmpty
-                  ? '选择字幕组并订阅后，这里会显示对应的播放资源'
-                  : '还没有本字幕组的资源，可刷新订阅后重试',
-            ),
-          ),
-        for (final release in releases) _releaseCard(release),
-        const SizedBox(height: 32),
       ],
     );
   }
 
-  Widget _subscriptionCard(RssSubscription subscription) {
-    final selected =
-        widget.service.subscriptionForSubject(subscription.bangumiId)?.id ==
-        subscription.id;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+  List<Widget> _groupSection(List<RssSubscription> subscriptions) {
+    final idle = _busy == null;
+    if (_show == null && subscriptions.isEmpty) {
+      if (!idle) return const [];
+      return [
+        const RssCaption('未匹配到蜜柑番组'),
+        RssGroup(
+          dividerIndent: 16 + 24 + 12,
           children: [
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(subscription.title),
-              subtitle: Text(subscription.subtitleGroupName),
-              onTap: widget.subject == null
-                  ? () => context.pushNamed(
-                      '/subscriptions/',
-                      arguments: subscription.subject,
-                    )
-                  : null,
-              trailing: Switch(
-                value: subscription.enabled,
-                onChanged: _busy == null
-                    ? (enabled) => _run(
-                        '正在更新订阅',
-                        (_) =>
-                            widget.service.setEnabled(subscription.id, enabled),
-                      )
-                    : null,
-              ),
+            RssActionRow(
+              icon: Icons.search_rounded,
+              label: '搜索番组',
+              onTap: _searchShow,
             ),
-            if (subscription.lastRefreshedAt != null)
-              Text(
-                '上次刷新 ${_date(subscription.lastRefreshedAt!)}',
-                style: Theme.of(context).textTheme.bodySmall,
+            RssActionRow(
+              icon: Icons.link_rounded,
+              label: '添加 RSS 地址',
+              onTap: _addFeed,
+            ),
+          ],
+        ),
+      ];
+    }
+    final selectedId = widget.service
+        .subscriptionForSubject(widget.subject!.id)
+        ?.id;
+    return [
+      const RssCaption('字幕组'),
+      RssGroup(
+        dividerIndent: 16 + 24 + 12,
+        children: [
+          for (final subscription in subscriptions)
+            _GroupRow(
+              subscription: subscription,
+              selected: subscription.id == selectedId,
+              enabled: idle,
+              onSelect: () => _select(subscription),
+              onRefresh: () => _refreshOne(subscription),
+              onToggle: () => _setEnabled(subscription, !subscription.enabled),
+              onRemove: () => _remove(subscription),
+            ),
+          if (_show != null)
+            RssActionRow(
+              icon: Icons.add_rounded,
+              label: subscriptions.isEmpty ? '选择字幕组' : '添加字幕组',
+              onTap: idle ? _chooseGroup : null,
+            )
+          else
+            RssActionRow(
+              icon: Icons.link_rounded,
+              label: '添加 RSS 地址',
+              onTap: idle ? _addFeed : null,
+            ),
+        ],
+      ),
+    ];
+  }
+
+  List<Widget> _releaseSection(
+    List<RssSubscription> subscriptions,
+    List<RssRelease> releases,
+  ) {
+    final palette = MonoPalette.of(context);
+    return [
+      RssCaption(
+        '资源',
+        trailing: releases.isEmpty ? null : '${releases.length} 个',
+      ),
+      if (releases.isEmpty)
+        RssGroup(
+          children: [
+            RssRow(
+              title: subscriptions.isEmpty
+                  ? '订阅字幕组后显示资源'
+                  : widget.service.subscriptionForSubject(widget.subject!.id) ==
+                        null
+                  ? '选择一个字幕组后显示资源'
+                  : '暂无资源',
+              titleColor: palette.secondaryLabel,
+            ),
+          ],
+        )
+      else
+        RssGroup(
+          dividerIndent: 16 + 44 + 12,
+          children: [
+            for (final release in releases)
+              _ReleaseRow(
+                release: release,
+                names: [widget.subject!.name, widget.subject!.nameCn],
+                isNew:
+                    _newSince != null &&
+                    (release.publishedAt?.isAfter(_newSince!) ?? false),
+                enabled: _busy == null && _torrentReady,
+                onPlay: () => _play(release),
+                onDownload: () => _download(release),
               ),
-            if (subscription.lastError != null)
-              Text(
-                subscription.lastError!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ],
+        ),
+    ];
+  }
+}
+
+/// The page body: a centred, readable column.
+class _Column extends StatelessWidget {
+  const _Column({required this.children, this.scrollable = true});
+
+  final List<Widget> children;
+  final bool scrollable;
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = 32 + MediaQuery.paddingOf(context).bottom;
+    if (!scrollable) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: settingsReadableWidth),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: children,
+            ),
+          ),
+        ),
+      );
+    }
+    return ListView(
+      padding: EdgeInsets.fromLTRB(16, 4, 16, bottom),
+      children: [
+        for (final child in children)
+          Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                maxWidth: settingsReadableWidth,
               ),
-            Wrap(
-              spacing: 8,
+              child: child,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _Cover extends StatelessWidget {
+  const _Cover({required this.subject, required this.width});
+
+  final BangumiItem subject;
+  final double width;
+
+  @override
+  Widget build(BuildContext context) {
+    final src = subject.images['large'] ?? subject.images['common'] ?? '';
+    return NetworkImgLayer(
+      src: src,
+      width: width,
+      height: width * 4 / 3,
+      borderRadius: BorderRadius.circular(width >= 56 ? 8 : 6),
+    );
+  }
+}
+
+class _SubjectHeader extends StatelessWidget {
+  const _SubjectHeader({required this.subject, required this.show});
+
+  final BangumiItem subject;
+  final MikanShow? show;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final palette = MonoPalette.of(context);
+    final name = subject.nameCn.isNotEmpty ? subject.nameCn : subject.name;
+    final original = subject.nameCn.isNotEmpty && subject.name != subject.nameCn
+        ? subject.name
+        : null;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(
+        children: [
+          _Cover(subject: subject, width: 60),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                if (selected)
-                  const Chip(
-                    label: Text('当前播放字幕组'),
-                    avatar: Icon(Icons.check_circle_outline, size: 18),
+                Text(
+                  name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontSize: 18,
+                    height: 1.3,
+                    fontWeight: FontWeight.w600,
                   ),
-                if (!selected)
-                  TextButton.icon(
-                    onPressed: _busy == null && subscription.enabled
-                        ? () => _run(
-                            '正在切换字幕组',
-                            (_) => widget.service.selectSubscription(
-                              subscription.id,
-                            ),
-                          )
-                        : null,
-                    icon: const Icon(Icons.play_circle_outline),
-                    label: const Text('设为播放字幕组'),
+                ),
+                if (original != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    original,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: palette.secondaryLabel,
+                    ),
                   ),
-                TextButton.icon(
-                  onPressed: _busy == null
-                      ? () => _run(
-                          '正在刷新字幕组',
-                          (token) => widget.service.refresh(
-                            subscriptionId: subscription.id,
-                            cancelToken: token,
+                ],
+                if (show != null) ...[
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.check_circle_rounded,
+                        size: 14,
+                        color: palette.success,
+                      ),
+                      const SizedBox(width: 4),
+                      Flexible(
+                        child: Text(
+                          '蜜柑 · ${show!.title}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: palette.secondaryLabel,
                           ),
-                        )
-                      : null,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('刷新'),
-                ),
-                TextButton.icon(
-                  onPressed: _busy == null ? () => _remove(subscription) : null,
-                  icon: const Icon(Icons.delete_outline),
-                  label: const Text('删除订阅'),
-                ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A subscribed subtitle group. Tapping picks it for playback; the menu
+/// refreshes, pauses or removes it.
+class _GroupRow extends StatelessWidget {
+  const _GroupRow({
+    required this.subscription,
+    required this.selected,
+    required this.enabled,
+    required this.onSelect,
+    required this.onRefresh,
+    required this.onToggle,
+    required this.onRemove,
+  });
+
+  final RssSubscription subscription;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onSelect;
+  final VoidCallback onRefresh;
+  final VoidCallback onToggle;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final palette = MonoPalette.of(context);
+    final active = subscription.enabled;
+    final error = subscription.lastError;
+    final refreshed = subscription.lastRefreshedAt;
+    return RssRow(
+      selected: selected,
+      leading: SizedBox(
+        width: 24,
+        child: Icon(
+          !active
+              ? Icons.pause_circle_outline_rounded
+              : selected
+              ? Icons.check_circle_rounded
+              : Icons.circle_outlined,
+          size: 22,
+          color: selected && active ? colors.primary : palette.tertiaryLabel,
+        ),
+      ),
+      title: subscription.subtitleGroupName,
+      titleWeight: selected ? FontWeight.w600 : FontWeight.w400,
+      subtitle:
+          error ??
+          (!active
+              ? '已暂停更新'
+              : refreshed == null
+              ? null
+              : '${rssShortDate(refreshed, withTime: true)} 刷新'),
+      subtitleColor: error != null ? colors.error : null,
+      onTap: enabled && active && !selected ? onSelect : null,
+      trailing: KazumiMenuButton(
+        enabled: enabled,
+        menuChildren: [
+          KazumiMenuItem(
+            label: '刷新',
+            leadingIcon: const Icon(Icons.refresh_rounded),
+            onPressed: onRefresh,
+          ),
+          KazumiMenuItem(
+            label: active ? '暂停更新' : '恢复更新',
+            leadingIcon: Icon(
+              active
+                  ? Icons.pause_circle_outline_rounded
+                  : Icons.play_circle_outline_rounded,
+            ),
+            onPressed: onToggle,
+          ),
+          KazumiMenuItem(
+            label: '删除订阅',
+            leadingIcon: const Icon(Icons.delete_outline_rounded),
+            destructive: true,
+            onPressed: onRemove,
+          ),
+        ],
+        builder: (context, toggle) =>
+            RssMoreButton(tooltip: '字幕组选项', onPressed: toggle),
+      ),
+    );
+  }
+}
+
+String _episodeLabel(double number) =>
+    number == number.truncateToDouble() ? '${number.toInt()}' : '$number';
+
+class _ReleaseRow extends StatelessWidget {
+  const _ReleaseRow({
+    required this.release,
+    required this.names,
+    this.isNew = false,
+    required this.enabled,
+    required this.onPlay,
+    required this.onDownload,
+  });
+
+  final RssRelease release;
+
+  /// Names of the show; bracketed tags repeating them are left out.
+  final List<String> names;
+  final bool enabled;
+  final VoidCallback onPlay;
+  final VoidCallback onDownload;
+
+  /// Published since the show was last opened.
+  final bool isNew;
+
+  bool get _canPlay =>
+      release.episodeNumber != null ||
+      release.isSpecial ||
+      (release.isBatch && release.episodeNumbers.isNotEmpty);
+
+  /// The bracketed tags of the title other than the group, the show, the
+  /// episode and the quality already shown: WebRip · HEVC · 简繁内封.
+  String get _tags {
+    final skip = {
+      release.group.toLowerCase(),
+      release.quality.toLowerCase(),
+      for (final name in names) name.toLowerCase(),
+    }..remove('');
+    final episode = RegExp(
+      r'^[\d.\s~&+-]+(?:\s*(?:合集|全集|end|v\d))?$',
+      caseSensitive: false,
+    );
+    return [
+      for (final match in RegExp(
+        r'[\[【]([^\]】]+)[\]】]',
+      ).allMatches(release.title))
+        if (match[1]!.trim() case final tag
+            when tag.isNotEmpty &&
+                !skip.contains(tag.toLowerCase()) &&
+                !episode.hasMatch(tag))
+          tag,
+    ].join(' · ');
+  }
+
+  (String badge, String title) get _labels {
+    final number = release.episodeNumber;
+    if (release.isBatch) {
+      final numbers = [...release.episodeNumbers]..sort();
+      return (
+        '合集',
+        numbers.isEmpty
+            ? '合集'
+            : '第 ${_episodeLabel(numbers.first)}–${_episodeLabel(numbers.last)} 话',
+      );
+    }
+    if (release.isSpecial) {
+      final key = (release.specialKey ?? 'sp').toUpperCase();
+      return (key.length > 3 ? 'SP' : key, number == null ? '特别篇' : '特别篇 $key');
+    }
+    if (number != null) {
+      final label = _episodeLabel(number);
+      return (label.length == 1 ? '0$label' : label, '第 $label 话');
+    }
+    return ('?', '未识别话数');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final palette = MonoPalette.of(context);
+    final (badge, title) = _labels;
+    final meta = [
+      if (release.quality.isNotEmpty) release.quality,
+      if (release.sizeBytes != null) formatBytes(release.sizeBytes!),
+      if (release.publishedAt != null) rssShortDate(release.publishedAt!),
+    ].join(' · ');
+    return Tooltip(
+      message: release.title,
+      waitDuration: const Duration(milliseconds: 600),
+      excludeFromSemantics: true,
+      child: RssRow(
+        leading: Container(
+          width: 44,
+          height: 44,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: palette.fill,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Text(
+            badge,
+            maxLines: 1,
+            style: TextStyle(
+              fontSize: badge.length > 2 ? 13 : 17,
+              fontWeight: FontWeight.w700,
+              color: colors.onSurface,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
+        title: title,
+        titleWeight: FontWeight.w500,
+        titleMaxLines: 1,
+        titleBadge: isNew ? const RssNewBadge() : null,
+        subtitle: meta,
+        detail: _tags.isEmpty ? release.title : _tags,
+        detailMaxLines: 1,
+        onTap: enabled && _canPlay ? onPlay : null,
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              tooltip: '下载',
+              onPressed: enabled ? onDownload : null,
+              color: palette.secondaryLabel,
+              icon: const Icon(Icons.download_rounded),
+            ),
+            if (_canPlay)
+              IconButton.filled(
+                tooltip: '播放',
+                onPressed: enabled ? onPlay : null,
+                style: IconButton.styleFrom(
+                  backgroundColor: colors.primary.withValues(alpha: 0.12),
+                  foregroundColor: colors.primary,
+                ),
+                icon: const Icon(Icons.play_arrow_rounded),
+              ),
           ],
         ),
       ),
     );
   }
+}
 
-  Widget _releaseCard(RssRelease release) {
-    final canPlay =
-        release.episodeNumber != null ||
-        release.isSpecial ||
-        (release.isBatch && release.episodeNumbers.isNotEmpty);
-    final capability = widget.torrentService.capability;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(release.title, style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Text(
-              [
-                if (release.group.isNotEmpty) release.group,
-                if (release.quality.isNotEmpty) release.quality,
-                if (release.sizeBytes != null) formatBytes(release.sizeBytes!),
-                if (release.publishedAt != null) _date(release.publishedAt!),
-              ].join(' · '),
-            ),
-            if (!canPlay)
-              const Padding(
-                padding: EdgeInsets.only(top: 8),
-                child: Text('暂时无法确认话数，可下载后查看文件'),
+class _SheetFrame extends StatelessWidget {
+  const _SheetFrame({
+    required this.title,
+    required this.child,
+    this.description,
+  });
+
+  final String title;
+  final String? description;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      MaterialBottomSheetHeader(
+        title: title,
+        description: description,
+        onClose: () => Navigator.of(context).pop(),
+      ),
+      Flexible(child: child),
+    ],
+  );
+}
+
+class _SheetList extends StatelessWidget {
+  const _SheetList({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => SingleChildScrollView(
+    padding: EdgeInsets.fromLTRB(
+      16,
+      0,
+      16,
+      16 + MediaQuery.paddingOf(context).bottom,
+    ),
+    child: RssGroup(children: children),
+  );
+}
+
+class _ShowSelection extends StatelessWidget {
+  const _ShowSelection({required this.shows});
+  final List<MikanShow> shows;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = MonoPalette.of(context);
+    return _SheetFrame(
+      title: '选择番组',
+      child: shows.isEmpty
+          ? const Padding(
+              padding: EdgeInsets.only(bottom: 24),
+              child: GeneralEmptyState(
+                icon: Icons.search_off_rounded,
+                title: '没有找到番组',
+                compact: true,
               ),
-            if (!capability.supported || !capability.ready)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(
-                  capability.unavailableReason ??
-                      (_torrentInitialization != null
-                          ? '正在准备磁力播放'
-                          : '磁力引擎暂不可用'),
-                ),
-              ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
+            )
+          : _SheetList(
               children: [
-                if (canPlay)
-                  FilledButton.icon(
-                    onPressed:
-                        _busy == null &&
-                            capability.supported &&
-                            capability.ready
-                        ? () => _play(release)
-                        : null,
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('RSS 播放'),
+                for (final show in shows)
+                  RssRow(
+                    title: show.title,
+                    trailing: Icon(
+                      Icons.chevron_right_rounded,
+                      color: palette.tertiaryLabel,
+                    ),
+                    onTap: () => Navigator.pop(context, show),
                   ),
-                OutlinedButton.icon(
-                  onPressed:
-                      _busy == null && capability.supported && capability.ready
-                      ? () => _download(release)
-                      : null,
-                  icon: const Icon(Icons.download),
-                  label: const Text('下载'),
-                ),
               ],
             ),
-          ],
-        ),
+    );
+  }
+}
+
+class _GroupSelection extends StatelessWidget {
+  const _GroupSelection({required this.show, required this.subscribed});
+  final MikanShow show;
+
+  /// Ids of the subtitle groups already subscribed for this show.
+  final Set<int> subscribed;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final palette = MonoPalette.of(context);
+    return _SheetFrame(
+      title: '选择字幕组',
+      description: show.title,
+      child: show.groups.isEmpty
+          ? const Padding(
+              padding: EdgeInsets.only(bottom: 24),
+              child: GeneralEmptyState(
+                icon: Icons.group_off_outlined,
+                title: '暂无字幕组',
+                compact: true,
+              ),
+            )
+          : _SheetList(
+              children: [
+                for (final group in show.groups)
+                  subscribed.contains(group.id)
+                      ? RssRow(
+                          title: group.name,
+                          titleColor: palette.secondaryLabel,
+                          trailing: Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: Text(
+                              '已订阅',
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: palette.secondaryLabel,
+                              ),
+                            ),
+                          ),
+                        )
+                      : RssRow(
+                          title: group.name,
+                          trailing: Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: Icon(
+                              Icons.add_rounded,
+                              color: colors.primary,
+                            ),
+                          ),
+                          onTap: () => Navigator.pop(context, group),
+                        ),
+              ],
+            ),
+    );
+  }
+}
+
+/// Picks one episode of a batch release.
+class _EpisodeNumberSheet extends StatelessWidget {
+  const _EpisodeNumberSheet({required this.numbers});
+
+  final List<double> numbers;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final palette = MonoPalette.of(context);
+    return _SheetFrame(
+      title: '选择话数',
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          const gap = 10.0;
+          final width = constraints.maxWidth - 40;
+          final columns = ((width + gap) / (64 + gap)).floor().clamp(4, 8);
+          return GridView.builder(
+            shrinkWrap: true,
+            padding: EdgeInsets.fromLTRB(
+              20,
+              4,
+              20,
+              16 + MediaQuery.paddingOf(context).bottom,
+            ),
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: columns,
+              mainAxisSpacing: gap,
+              crossAxisSpacing: gap,
+              mainAxisExtent: 48,
+            ),
+            itemCount: numbers.length,
+            itemBuilder: (context, index) {
+              final number = numbers[index];
+              return Material(
+                color: palette.sheetGroup,
+                borderRadius: BorderRadius.circular(10),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
+                  onTap: () => Navigator.pop(context, number),
+                  child: Center(
+                    child: Text(
+                      _episodeLabel(number),
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: colors.onSurface,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          );
+        },
       ),
     );
   }
@@ -805,117 +1355,6 @@ int? _subjectId(String value) {
   }
   final id = int.tryParse(uri.pathSegments.last);
   return id != null && id > 0 ? id : null;
-}
-
-String _date(DateTime date) =>
-    '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
-String _episodeLabel(double number) =>
-    number == number.truncateToDouble() ? '${number.toInt()}' : '$number';
-
-class _LoadingRow extends StatelessWidget {
-  const _LoadingRow({required this.label, required this.onCancel});
-  final String label;
-  final VoidCallback onCancel;
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.all(16),
-    child: Row(
-      children: [
-        const SizedBox(
-          width: 20,
-          height: 20,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
-        const SizedBox(width: 12),
-        Expanded(child: Text(label)),
-        TextButton(onPressed: onCancel, child: const Text('取消')),
-      ],
-    ),
-  );
-}
-
-class _ErrorRow extends StatelessWidget {
-  const _ErrorRow({required this.message, this.onRetry});
-  final String message;
-  final VoidCallback? onRetry;
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-    child: Row(
-      children: [
-        Icon(Icons.error_outline, color: Theme.of(context).colorScheme.error),
-        const SizedBox(width: 12),
-        Expanded(child: Text(message)),
-        TextButton(onPressed: onRetry, child: const Text('重试')),
-      ],
-    ),
-  );
-}
-
-class _ShowSelection extends StatelessWidget {
-  const _ShowSelection({required this.shows});
-  final List<MikanShow> shows;
-  @override
-  Widget build(BuildContext context) => SizedBox(
-    height: 480,
-    child: Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: Text('选择对应季度', style: Theme.of(context).textTheme.titleLarge),
-        ),
-        Expanded(
-          child: shows.isEmpty
-              ? const GeneralEmptyState(icon: Icons.search_off, title: '没有找到番组')
-              : ListView(
-                  children: [
-                    for (final show in shows)
-                      ListTile(
-                        title: Text(show.title),
-                        trailing: const Icon(Icons.chevron_right),
-                        onTap: () => Navigator.pop(context, show),
-                      ),
-                  ],
-                ),
-        ),
-      ],
-    ),
-  );
-}
-
-class _GroupSelection extends StatelessWidget {
-  const _GroupSelection({required this.show});
-  final MikanShow show;
-  @override
-  Widget build(BuildContext context) => SizedBox(
-    height: 480,
-    child: Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: Text('选择字幕组', style: Theme.of(context).textTheme.titleLarge),
-        ),
-        Expanded(
-          child: show.groups.isEmpty
-              ? const GeneralEmptyState(
-                  icon: Icons.group_off_outlined,
-                  title: '这个番组还没有字幕组 RSS',
-                )
-              : ListView(
-                  children: [
-                    for (final group in show.groups)
-                      ListTile(
-                        leading: const Icon(Icons.rss_feed),
-                        title: Text(group.name),
-                        trailing: const Icon(Icons.add_rounded),
-                        onTap: () => Navigator.pop(context, group),
-                      ),
-                  ],
-                ),
-        ),
-      ],
-    ),
-  );
 }
 
 class _InputDialog extends StatefulWidget {

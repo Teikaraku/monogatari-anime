@@ -73,7 +73,8 @@ void main() {
       await _until(() => manager.requests.isNotEmpty);
       final first = manager.requests.single;
       expect(first.pluginName, apiPlaybackLibraryName);
-      expect(first.adBlockerEnabled, isFalse);
+      expect(first.adBlockerEnabled, isTrue);
+      expect(first.publicNetworkOnly, isTrue);
       expect(first.m3u8Url, 'https://zy1080.example/12.5.m3u8');
       final record = repository.getRecord('${apiPlaybackLibraryName}_123')!;
       expect(record.sourceSubject?.airDate, '2024-10-01');

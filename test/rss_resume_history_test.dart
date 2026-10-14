@@ -98,11 +98,39 @@ void main() {
       expect(
         repository
             .getHistory(apiPlaybackLibraryName, subject)!
-            .progresses[3]!
+            .progresses[12]!
             .progress
             .inMilliseconds,
         84500,
       );
+    },
+  );
+
+  test(
+    'verified legacy cumulative RSS progress migrates to the season identity without duplication',
+    () async {
+      await repository.updateHistory(
+        identity: _identity(subject, slot: 1, contentNumber: 13),
+        progress: const Duration(seconds: 97),
+      );
+      final normalized = _identity(
+        subject,
+        slot: 4,
+        contentNumber: 1,
+        legacyUrls: ['monogatari://episode/${subject.id}/13'],
+      );
+      expect(controller.getHistoryOffsetFor(normalized), 97);
+      await repository.updateHistory(
+        identity: normalized,
+        progress: const Duration(seconds: 98),
+      );
+      final history = repository.getHistory(apiPlaybackLibraryName, subject)!;
+      expect(history.progresses.keys, [1]);
+      expect(
+        history.progresses[1]!.episodePageUrl,
+        'monogatari://episode/${subject.id}/1',
+      );
+      expect(history.progresses[1]!.progress.inSeconds, 98);
     },
   );
 
@@ -118,7 +146,7 @@ void main() {
         progress: const Duration(seconds: 120),
       );
       final history = repository.getHistory(apiPlaybackLibraryName, subject)!;
-      expect(history.lastWatchEpisode, 7);
+      expect(history.lastWatchEpisode, 2);
 
       // A different group can put episode 1 in the latest episode's old slot.
       expect(
@@ -183,6 +211,7 @@ PlaybackHistoryIdentity _identity(
   required int slot,
   int? contentNumber,
   String? pageUrl,
+  List<String> legacyUrls = const [],
 }) => PlaybackHistoryIdentity.online(
   bangumiItem: subject,
   pluginName: apiPlaybackLibraryName,
@@ -192,6 +221,7 @@ PlaybackHistoryIdentity _identity(
   onlineBangumiSrc: 'monogatari://subject/${subject.id}',
   episodePageUrl:
       pageUrl ?? 'monogatari://episode/${subject.id}/$contentNumber',
+  legacyEpisodePageUrls: legacyUrls,
 );
 
 RssRelease _release(String key, String group, double number) => RssRelease(

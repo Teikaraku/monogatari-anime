@@ -24,6 +24,8 @@ import 'package:kazumi/pages/player/player_item_surface.dart';
 import 'package:kazumi/pages/video/episode_selection_panel.dart';
 import 'package:kazumi/pages/video/player_content_tabs.dart';
 import 'package:kazumi/pages/video/video_controller.dart';
+import 'package:kazumi/pages/video/playback_source_switch.dart';
+import 'package:kazumi/utils/theme.dart';
 import 'package:kazumi/pages/video/video_playback_args.dart';
 import 'package:kazumi/pages/video/video_page_layout.dart';
 import 'package:kazumi/pages/video/video_side_panel.dart';
@@ -719,33 +721,39 @@ class _VideoPageState extends State<VideoPage>
   }
 
   Widget _sourceControls() => Observer(
-    builder: (context) => Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 8, 0),
-      child: Row(
-        children: [
-          Expanded(
-            child: SegmentedButton<String>(
-              segments: const [
-                ButtonSegment(value: 'api', label: Text('在线播放')),
-                ButtonSegment(value: 'rss', label: Text('RSS 播放')),
-              ],
-              selected: {videoPageController.playbackSource},
-              showSelectedIcon: false,
-              onSelectionChanged: (value) => _switchSource(value.single),
+    builder: (context) {
+      final secondary = MonoPalette.of(context).secondaryLabel;
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 10, 8, 2),
+        child: Row(
+          children: [
+            Expanded(
+              child: Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 240),
+                  child: PlaybackSourceSwitch(
+                    value: videoPageController.playbackSource,
+                    onChanged: _switchSource,
+                  ),
+                ),
+              ),
             ),
-          ),
-          IconButton(
-            tooltip: '字幕组订阅',
-            onPressed: _openSubscriptions,
-            icon: const Icon(Icons.rss_feed),
-          ),
-          IconButton(
-            tooltip: '磁力任务',
-            onPressed: _openTorrentTasks,
-            icon: const Icon(Icons.downloading_outlined),
-          ),
-        ],
-      ),
-    ),
+            IconButton(
+              tooltip: '字幕组订阅',
+              onPressed: _openSubscriptions,
+              color: secondary,
+              icon: const Icon(Icons.rss_feed_rounded),
+            ),
+            IconButton(
+              tooltip: '磁力任务',
+              onPressed: _openTorrentTasks,
+              color: secondary,
+              icon: const Icon(Icons.hub_rounded),
+            ),
+          ],
+        ),
+      );
+    },
   );
 }

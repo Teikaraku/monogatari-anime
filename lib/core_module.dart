@@ -1,4 +1,6 @@
 import 'package:flutter_modular/flutter_modular.dart';
+import 'package:kazumi/bean/dialog/dialog.dart';
+import 'package:kazumi/services/sync/rss_sync_service.dart';
 import 'package:kazumi/pages/collect/collect_controller.dart';
 import 'package:kazumi/pages/download/download_controller.dart';
 import 'package:kazumi/pages/history/history_controller.dart';
@@ -23,6 +25,7 @@ import 'package:kazumi/services/torrent/torrent_service.dart';
 import 'package:kazumi/services/torrent/torrent_network_policy.dart';
 import 'package:kazumi/services/torrent/dart_torrent_engine.dart';
 import 'package:kazumi/request/core/network_config.dart';
+import 'package:kazumi/request/apis/main_episode_cache.dart';
 import 'package:kazumi/services/torrent/torrent_background_coordinator.dart';
 import 'package:kazumi/navigation.dart';
 
@@ -53,10 +56,13 @@ final coreModule = createModule(
           engine: DartTorrentEngine(
             metadataProxy: (uri) =>
                 NetworkConfig.fromSettings().proxyForUri(uri)?.toString(),
+            uploadLimit: torrentUploadLimit,
           ),
         ),
       )
-      ..addSingleton<RssPlaybackResolver>(RssPlaybackResolver.new)
+      ..addSingleton<RssPlaybackResolver>((RssSubscriptionService subscriptions,
+          TorrentService torrents) => RssPlaybackResolver(subscriptions, torrents,
+            loadEpisodes: MainEpisodeCache.get))
       ..addSingleton<TorrentBackgroundCoordinator>(_createTorrentBackground)
       ..addSingleton<IDownloadManager>(() => DownloadManager())
       ..addSingleton<AudioController>(AudioController.new)
@@ -64,6 +70,7 @@ final coreModule = createModule(
       ..addSingleton<ShaderAssetService>(ShaderAssetService.new)
       ..addSingleton<WebDav>(WebDav.new)
       ..addSingleton<DanmakuShieldSyncService>(DanmakuShieldSyncService.new)
+      ..addSingleton<RssSyncService>(RssSyncService.new)
       // Cross-feature state and coordinators.
       ..addSingleton<CollectController>(CollectController.new)
       ..addSingleton<HistoryController>(HistoryController.new)
@@ -76,6 +83,7 @@ TorrentBackgroundCoordinator _createTorrentBackground(
   TorrentService torrents,
 ) => TorrentBackgroundCoordinator(
   torrents,
+  onNotice: (message) => KazumiDialog.showToast(message: message),
   onNavigateRequested: () {
     final context = rootNavigatorKey.currentContext;
     if (context != null &&

@@ -6,6 +6,15 @@ import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/pages/info/info_catalog_prefetch.dart';
 
 void main() {
+  test('default detail route owns revisions without a provider warmup', () {
+    final owner = InfoCatalogPrefetch();
+    final subject = _subject(42);
+    final revision = owner.beginSubject(subject.id);
+    owner.afterDetailsApplied(revision, subject);
+    expect(owner.isCurrent(revision, 42), isTrue);
+    owner.dispose();
+    expect(owner.isCurrent(revision, 42), isFalse);
+  });
   test('sparse detail input does not warm a partial matching key', () {
     final calls = <BangumiItem>[];
     final owner = InfoCatalogPrefetch((subject, _) async => calls.add(subject));

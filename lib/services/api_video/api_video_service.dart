@@ -1,11 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/request/core/dio_factory.dart';
 import 'package:kazumi/services/api_video/api_video_models.dart';
 import 'package:kazumi/services/video_source/video_source_format.dart';
+import 'episode_identity.dart';
+import 'api_video_url_policy.dart';
 
 export 'api_video_models.dart';
 
@@ -22,6 +27,7 @@ class ApiVideoService {
     this.cacheTtl = const Duration(minutes: 5),
     this.providerTimeout = const Duration(seconds: 15),
     this.maxCachedProviders = 96,
+    this.maxResponseBytes = 8 * 1024 * 1024,
     DateTime Function()? clock,
   }) : assert(maxCachedProviders > 0),
        _dio = dio,
@@ -34,13 +40,17 @@ class ApiVideoService {
   final Duration cacheTtl;
   final Duration providerTimeout;
   final int maxCachedProviders;
+  final int maxResponseBytes;
   final Map<String, _CachedTitles> _cache = {};
   final Map<String, _ProviderFlight> _inFlight = {};
+  final Map<ApiVideoProvider, (DateTime, ApiVideoFailure)> _providerFailures =
+      {};
   int _cacheRevision = 0;
 
   void clearCache() {
     _cacheRevision++;
     _cache.clear();
+    _providerFailures.clear();
     // Existing consumers may finish, but new requests must not join them or
     // accept their late cache writes after an explicit refresh.
     _inFlight.clear();
@@ -62,13 +72,16 @@ class ApiVideoService {
     CancelToken? cancelToken,
   }) async {
     final preparation = _prepareMetadata(subject, cancelToken);
+    final failures = <ApiVideoFailure?>[];
     for (final load in preparation.loads) {
       _checkCancelled(cancelToken);
-      final titles = await load;
+      final outcome = await load;
+      final titles = outcome.titles;
+      failures.add(outcome.failure);
       _checkCancelled(cancelToken);
       if (titles.isNotEmpty) return titles.first.catalog;
     }
-    throw const ApiVideoUnavailableException();
+    throw ApiVideoUnavailableException.fromFailures(failures);
   }
 
   /// Fills gaps after the first catalog is ready. Existing list positions are
@@ -85,7 +98,7 @@ class ApiVideoService {
     final keys = episodes.map((episode) => episode.key).toSet();
     for (final load in preparation.loads) {
       _checkCancelled(cancelToken);
-      final titles = await load;
+      final titles = (await load).titles;
       final added = <ApiVideoEpisode>[];
       for (final title in titles) {
         for (final episode in title.catalog.episodes) {
@@ -110,9 +123,12 @@ class ApiVideoService {
     preparation,
   ) async* {
     final emitted = <String>{};
+    final failures = <ApiVideoFailure?>[];
     for (final load in preparation.loads) {
       _checkCancelled(cancelToken);
-      final titles = await load;
+      final outcome = await load;
+      final titles = outcome.titles;
+      failures.add(outcome.failure);
       for (final title in titles) {
         for (final candidate in title.candidates) {
           _checkCancelled(cancelToken);
@@ -122,6 +138,9 @@ class ApiVideoService {
           }
         }
       }
+    }
+    if (emitted.isEmpty) {
+      throw ApiVideoUnavailableException.fromFailures(failures);
     }
   });
 
@@ -137,7 +156,7 @@ class ApiVideoService {
     final cancellation = callerToken?.whenCancel.asStream().listen((error) {
       if (!scope.isCancelled) scope.cancel(error);
     });
-    final loads = <Future<List<_ProviderTitle>>>[];
+    final loads = <Future<_ProviderOutcome>>[];
     for (final provider in apiVideoProviderPriority) {
       if (callerToken?.isCancelled ?? false) {
         scope.cancel(callerToken!.cancelError);
@@ -196,7 +215,7 @@ class ApiVideoService {
     return controller.stream;
   }
 
-  Future<List<_ProviderTitle>> _loadProvider(
+  Future<_ProviderOutcome> _loadProvider(
     _SubjectQuery query,
     ApiVideoProvider provider,
     CancelToken? callerToken,
@@ -207,7 +226,11 @@ class ApiVideoService {
     final cached = _cache.remove(key);
     if (cached != null) {
       _cache[key] = cached; // Touch a cache hit for bounded LRU eviction.
-      return cached.titles;
+      return cached.outcome;
+    }
+    final health = _providerFailures[provider];
+    if (health != null && _clock().isBefore(health.$1)) {
+      return _ProviderOutcome(const [], health.$2);
     }
     final flight = _inFlight.putIfAbsent(
       key,
@@ -221,11 +244,11 @@ class ApiVideoService {
     return result;
   }
 
-  Future<List<_ProviderTitle>> _joinFlight(
+  Future<_ProviderOutcome> _joinFlight(
     _ProviderFlight flight,
     CancelToken? callerToken,
   ) {
-    final result = Completer<List<_ProviderTitle>>();
+    final result = Completer<_ProviderOutcome>();
     var released = false;
     StreamSubscription<DioException>? cancellation;
     flight.consumers++;
@@ -263,7 +286,7 @@ class ApiVideoService {
   ) async {
     final timer = Timer(providerTimeout, () => flight.token.cancel('资源站请求超时'));
     var result = <_ProviderTitle>[];
-    var failure = false;
+    ApiVideoFailure? failure;
     try {
       result = await Future.any([
         _searchProvider(provider, query.names, query.year, flight.token),
@@ -271,20 +294,30 @@ class ApiVideoService {
           (error) => throw error,
         ),
       ]);
-    } catch (_) {
+    } catch (error) {
       // A challenge page, unavailable API, invalid response or source timeout
       // must allow the next provider to run, never open a captcha/source sheet.
-      failure = true;
+      failure = _failureFor(error);
     } finally {
       timer.cancel();
     }
     if (!flight.abandoned && flight.revision == _cacheRevision) {
+      if (failure == ApiVideoFailure.network ||
+          failure == ApiVideoFailure.timeout ||
+          failure == ApiVideoFailure.blocked) {
+        _providerFailures[provider] = (
+          _clock().add(const Duration(seconds: 15)),
+          failure!,
+        );
+      } else if (failure == null) {
+        _providerFailures.remove(provider);
+      }
       _pruneCache();
       _cache.remove(flight.key);
       _cache[flight.key] = _CachedTitles(
-        result,
+        _ProviderOutcome(result, failure),
         _clock().add(
-          failure
+          failure != null
               ? const Duration(seconds: 15)
               : result.isEmpty
               ? const Duration(seconds: 30)
@@ -297,7 +330,7 @@ class ApiVideoService {
     }
     flight.completed = true;
     if (identical(_inFlight[flight.key], flight)) _inFlight.remove(flight.key);
-    flight.result.complete(result);
+    flight.result.complete(_ProviderOutcome(result, failure));
   }
 
   void _pruneCache() {
@@ -328,10 +361,12 @@ class ApiVideoService {
       // Only matching search results are paged, never crawl a site's entire
       // library. Typical anime searches fit on one page.
       for (var page = 2; page <= pages && page <= 3; page++) {
-        if (rows.any(
-          (row) =>
-              _matches(row, expected) && _parseTitle(provider, row) != null,
-        )) {
+        if ((await _matchingTitles(
+          provider,
+          rows,
+          expected,
+          year,
+        )).isNotEmpty) {
           break;
         }
         rows.addAll(
@@ -344,22 +379,32 @@ class ApiVideoService {
           ),
         );
       }
-      final matched = rows.where((row) => _matches(row, expected)).toList();
-      if (year != null && matched.length > 1) {
-        final sameYear = matched
-            .where((row) => _text(row['vod_year']) == '$year')
-            .toList();
-        if (sameYear.isNotEmpty) {
-          matched.removeWhere((row) => !sameYear.contains(row));
-        }
-      }
-      final parsed = matched
-          .map((row) => _parseTitle(provider, row))
-          .whereType<_ProviderTitle>()
-          .toList();
+      final parsed = await _matchingTitles(provider, rows, expected, year);
+      _checkCancelled(token);
       if (parsed.isNotEmpty) return parsed;
     }
     return const [];
+  }
+
+  Future<List<_ProviderTitle>> _matchingTitles(
+    ApiVideoProvider provider,
+    List<Map<String, dynamic>> rows,
+    Set<String> expected,
+    int? year,
+  ) async {
+    final matched = rows.where((row) => _matches(row, expected)).toList();
+    if (year != null) {
+      // A single old remake is still a mismatch. Missing years cannot prove
+      // that a namesake belongs to the requested Bangumi subject either.
+      matched.removeWhere((row) => _text(row['vod_year']) != '$year');
+    }
+    final weight = matched.fold<int>(
+      0,
+      (size, row) => size + _text(row['vod_play_url']).length,
+    );
+    return weight >= 128 * 1024
+        ? await compute(_parseProviderTitles, (provider, matched))
+        : _parseProviderTitles((provider, matched));
   }
 
   Future<Map<String, dynamic>> _providerRequest(
@@ -396,25 +441,109 @@ class ApiVideoService {
     if (injected != null) {
       raw = await injected(uri, token);
     } else {
-      final response = await (_dio ?? DioFactory.apiDio).get<Object?>(
-        uri.toString(),
-        cancelToken: token,
-        options: Options(
-          responseType: ResponseType.plain,
-          sendTimeout: const Duration(seconds: 6),
-          receiveTimeout: const Duration(seconds: 8),
-          headers: const {'accept': 'application/json'},
-        ),
+      final child = CancelToken();
+      final cancellation = token?.whenCancel.asStream().listen(
+        (error) => child.cancel(error),
       );
-      raw = response.data;
+      try {
+        final response = await (_dio ?? DioFactory.apiDio).get<ResponseBody>(
+          uri.toString(),
+          cancelToken: child,
+          options: Options(
+            responseType: ResponseType.stream,
+            connectTimeout: const Duration(seconds: 6),
+            sendTimeout: const Duration(seconds: 6),
+            receiveTimeout: const Duration(seconds: 8),
+            headers: const {'accept': 'application/json'},
+          ),
+        );
+        final declared = int.tryParse(
+          response.headers.value('content-length') ?? '',
+        );
+        final body = BytesBuilder(copy: false);
+        if (declared != null && declared > maxResponseBytes) {
+          child.cancel('Response too large');
+          throw const FormatException('资源站响应过大');
+        }
+        await for (final block in response.data!.stream) {
+          _checkCancelled(token);
+          if (body.length + block.length > maxResponseBytes) {
+            child.cancel('Response too large');
+            throw const FormatException('资源站响应过大');
+          }
+          body.add(block);
+        }
+        final bytes = body.takeBytes();
+        raw = bytes.length >= 128 * 1024
+            ? await compute(_decodeProviderBytes, bytes)
+            : _decodeProviderBytes(bytes);
+      } finally {
+        await cancellation?.cancel();
+      }
     }
     _checkCancelled(token);
-    final document = raw is String ? jsonDecode(raw) : raw;
+    if (raw is String &&
+        (raw.length > maxResponseBytes ||
+            utf8.encode(raw).length > maxResponseBytes)) {
+      throw const FormatException('资源站响应过大');
+    }
+    final document = raw is String
+        ? raw.length >= 128 * 1024
+              ? await compute(_decodeProviderText, raw)
+              : _decodeProviderText(raw)
+        : raw;
     if (document is! Map) throw const FormatException('资源站未返回 JSON 对象');
     final result = Map<String, dynamic>.from(document);
     if (result['list'] is! List) throw const FormatException('资源站响应缺少列表');
+    if ((result['list'] as List).length > 5000) {
+      throw const FormatException('资源站条目过多');
+    }
     return result;
   }
+}
+
+Object? _decodeProviderBytes(Uint8List bytes) =>
+    _decodeProviderText(utf8.decode(bytes));
+Object? _decodeProviderText(String text) {
+  if (text.trimLeft().startsWith('<')) {
+    throw const ApiVideoUnavailableException(
+      '片源返回了验证页',
+      ApiVideoFailure.blocked,
+    );
+  }
+  return jsonDecode(text);
+}
+
+List<_ProviderTitle> _parseProviderTitles(
+  (ApiVideoProvider, List<Map<String, dynamic>>) args,
+) => args.$2
+    .map((row) => _parseTitle(args.$1, row))
+    .whereType<_ProviderTitle>()
+    .toList();
+
+ApiVideoFailure _failureFor(Object error) {
+  if (error is ApiVideoUnavailableException && error.failure != null) {
+    return error.failure!;
+  }
+  if (error is TimeoutException) return ApiVideoFailure.timeout;
+  if (error is SocketException) return ApiVideoFailure.network;
+  if (error is DioException) {
+    return switch (error.type) {
+      DioExceptionType.connectionTimeout ||
+      DioExceptionType.receiveTimeout ||
+      DioExceptionType.sendTimeout ||
+      DioExceptionType.transformTimeout ||
+      DioExceptionType.cancel => ApiVideoFailure.timeout,
+      DioExceptionType.connectionError ||
+      DioExceptionType.badCertificate => ApiVideoFailure.network,
+      DioExceptionType.badResponse =>
+        const {401, 403, 429, 503}.contains(error.response?.statusCode)
+            ? ApiVideoFailure.blocked
+            : ApiVideoFailure.network,
+      DioExceptionType.unknown => ApiVideoFailure.network,
+    };
+  }
+  return ApiVideoFailure.invalidResponse;
 }
 
 List<Map<String, dynamic>> _rows(Map<String, dynamic> document) =>
@@ -534,9 +663,7 @@ _ProviderTitle? _parseTitle(
       final label = entry.substring(0, separator).trim();
       final url = entry.substring(separator + 1).trim();
       final uri = Uri.tryParse(url);
-      if (uri == null ||
-          (uri.scheme != 'https' && uri.scheme != 'http') ||
-          uri.host.isEmpty) {
+      if (uri == null || !isPublicVideoUri(uri)) {
         continue;
       }
       // Parser pages whose query embeds .m3u8 are intentionally rejected.
@@ -617,13 +744,13 @@ ApiVideoEpisode? _parseEpisode(String label, bool singleton) {
   }
   // Never infer a numbered episode from its array position; extras may appear
   // first or differ between providers, causing the wrong episode to play.
-  return ApiVideoEpisode(key: 'special:${_normalizeTitle(text)}', title: text);
+  return ApiVideoEpisode(key: specialEpisodeKey(text), title: text);
 }
 
 bool _sameEpisode(ApiVideoEpisode desired, ApiVideoEpisode candidate) =>
     desired.number != null && candidate.number != null
     ? desired.number == candidate.number
-    : desired.key == candidate.key;
+    : canonicalEpisodeKey(desired.key) == canonicalEpisodeKey(candidate.key);
 
 int _compareEpisodes(ApiVideoEpisode a, ApiVideoEpisode b) {
   if (a.number != null && b.number != null) {
@@ -641,8 +768,8 @@ class _ProviderTitle {
 }
 
 class _CachedTitles {
-  const _CachedTitles(this.titles, this.expires);
-  final List<_ProviderTitle> titles;
+  const _CachedTitles(this.outcome, this.expires);
+  final _ProviderOutcome outcome;
   final DateTime expires;
 }
 
@@ -668,7 +795,7 @@ class _ProviderFlight {
   final String key;
   final int revision;
   final token = CancelToken();
-  final result = Completer<List<_ProviderTitle>>();
+  final result = Completer<_ProviderOutcome>();
   int consumers = 0;
   bool started = false;
   bool completed = false;
@@ -687,7 +814,7 @@ class _MetadataPreparation {
   }
 
   final CancelToken token;
-  final List<Future<List<_ProviderTitle>>> loads;
+  final List<Future<_ProviderOutcome>> loads;
   final StreamSubscription<DioException>? cancellation;
   late final Future<void> settled;
 
@@ -695,4 +822,10 @@ class _MetadataPreparation {
     unawaited(cancellation?.cancel());
     if (!token.isCancelled) token.cancel('目录准备结束');
   }
+}
+
+class _ProviderOutcome {
+  const _ProviderOutcome(this.titles, this.failure);
+  final List<_ProviderTitle> titles;
+  final ApiVideoFailure? failure;
 }

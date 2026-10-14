@@ -11,11 +11,13 @@ import 'package:kazumi/services/network/bangumi_acceleration.dart';
 import 'package:kazumi/services/network/bangumi_ech_resolver.dart';
 
 const _echRequestKey = 'bangumiEch';
+const _originalRequestKey = 'bangumiOriginalApi';
 
 class BangumiAccelerationInterceptor extends Interceptor {
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
     options.extra.remove(_echRequestKey);
+    options.extra.remove(_originalRequestKey);
     final uri = options.uri;
     if (ApiEndpoints.bangumiPublicApiHosts.contains(uri.host)) {
       switch (BangumiAcceleration.current) {
@@ -26,6 +28,7 @@ class BangumiAccelerationInterceptor extends Interceptor {
           options.queryParameters = {};
           options.extra[_echRequestKey] = true;
         case BangumiAcceleration.mirror:
+          options.extra[_originalRequestKey] = uri.toString();
           options.path =
               ApiEndpoints.bangumiMirrorDomain +
               uri.path +
@@ -42,11 +45,15 @@ class BangumiEchAdapter implements HttpClientAdapter {
   BangumiEchAdapter({
     required HttpClientAdapter fallback,
     required NetworkConfig config,
+    http.Client Function(RequestOptions)? echClient,
   }) : _fallback = fallback,
-       _config = config;
+       _config = config,
+       _injectedClient = echClient;
 
   final HttpClientAdapter _fallback;
   final NetworkConfig _config;
+  final http.Client Function(RequestOptions)? _injectedClient;
+  DateTime? _mirrorUnavailableUntil;
   final _resolvers = <Uri?, DohEchResolver>{};
   final _clients = <(Uri?, Uri?, Duration, Duration), EchClient>{};
   final _activeRequests = <Completer<void>>{};
@@ -89,7 +96,52 @@ class BangumiEchAdapter implements HttpClientAdapter {
   ) async {
     if (_closed) throw StateError('Bangumi ECH adapter is closed');
     if (options.extra[_echRequestKey] != true) {
-      return _fallback.fetch(options, requestStream, cancelFuture);
+      final original = Uri.tryParse(
+        options.extra[_originalRequestKey]?.toString() ?? '',
+      );
+      final recoverable =
+          original != null &&
+          ApiEndpoints.bangumiPublicApiHosts.contains(original.host) &&
+          options.uri.host ==
+              Uri.parse(ApiEndpoints.bangumiMirrorDomain).host &&
+          options.method == 'GET' &&
+          requestStream == null &&
+          !options.headers.keys.any(
+            (name) =>
+                const {'authorization', 'cookie'}.contains(name.toLowerCase()),
+          );
+      if (!recoverable)
+        return _fallback.fetch(options, requestStream, cancelFuture);
+      if (_mirrorUnavailableUntil == null ||
+          DateTime.now().isAfter(_mirrorUnavailableUntil!)) {
+        try {
+          final response = await _fallback.fetch(
+            options,
+            requestStream,
+            cancelFuture,
+          );
+          if (response.statusCode < 500) {
+            _mirrorUnavailableUntil = null;
+            return response;
+          }
+          await response.stream.listen((_) {}).cancel();
+        } catch (error) {
+          if (error is DioException &&
+              (error.type == DioExceptionType.cancel ||
+                  error.type == DioExceptionType.badCertificate))
+            rethrow;
+        }
+        _mirrorUnavailableUntil = DateTime.now().add(
+          const Duration(seconds: 30),
+        );
+      }
+      final recovery = options.copyWith(
+        path: original.toString(),
+        baseUrl: '',
+        queryParameters: {},
+        extra: {...options.extra, _echRequestKey: true},
+      );
+      return fetch(recovery, null, cancelFuture);
     }
 
     final abort = Completer<void>();
@@ -106,7 +158,7 @@ class BangumiEchAdapter implements HttpClientAdapter {
     }
 
     try {
-      final client = _clientFor(options);
+      final client = _injectedClient?.call(options) ?? _clientFor(options);
       final request =
           _EchRequest(options.method, options.uri, requestStream, abort.future)
             ..followRedirects = options.followRedirects

@@ -79,7 +79,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('选择字幕组并订阅'));
+      await tester.tap(find.text('选择字幕组'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('字幕组甲'));
       await tester.pumpAndSettle();
@@ -119,7 +119,7 @@ void main() {
 
     expect(find.text('这个蜜柑番组与当前 Bangumi 条目不一致，请选择对应季度'), findsOneWidget);
     expect(rss.selectedGroup, isNull);
-    expect(find.text('选择字幕组并订阅'), findsNothing);
+    expect(find.text('选择字幕组'), findsNothing);
   });
 
   testWidgets(
@@ -164,13 +164,105 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(rss.selectedId, 'first');
-      await tester.ensureVisible(find.text('设为播放字幕组'));
-      await tester.tap(find.text('设为播放字幕组'));
+      Finder checkIn(String group) => find.descendant(
+        of: find.ancestor(of: find.text(group), matching: find.byType(InkWell)),
+        matching: find.byIcon(Icons.check_circle_rounded),
+      );
+      expect(checkIn('字幕组甲'), findsOneWidget);
+      await tester.tap(find.text('字幕组乙'));
       await tester.pumpAndSettle();
       expect(rss.selectedId, 'second');
-      expect(find.text('当前播放字幕组'), findsOneWidget);
+      expect(checkIn('字幕组乙'), findsOneWidget);
+      expect(checkIn('字幕组甲'), findsNothing);
     },
   );
+
+  testWidgets('release rows lead with the episode and list the title tags', (
+    tester,
+  ) async {
+    final rss = _RssService()
+      ..resolvedShow = _show()
+      ..releases = [
+        RssRelease(
+          key: 'five',
+          title:
+              '[字幕组甲] 葬送的芙莉莲 / Sousou no Frieren [05][WebRip][1080p][HEVC_AAC][简繁日内封]',
+          detailUri: Uri.parse('https://mikanani.me/Home/Episode/five'),
+          episodeNumber: 5,
+          quality: '1080p',
+          group: '字幕组甲',
+          bangumiId: 400602,
+        ),
+        RssRelease(
+          key: 'batch',
+          title: '[字幕组甲] 葬送的芙莉莲 [01-12 合集][1080p]',
+          detailUri: Uri.parse('https://mikanani.me/Home/Episode/batch'),
+          episodeNumbers: const [1, 12],
+          isBatch: true,
+          quality: '1080p',
+          group: '字幕组甲',
+          bangumiId: 400602,
+        ),
+      ];
+    final torrent = _TorrentService();
+    addTearDown(rss.dispose);
+    addTearDown(torrent.close);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SubscriptionsPage(
+          service: rss,
+          torrentService: torrent,
+          subject: _subject(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('第 5 话'), findsOneWidget);
+    expect(find.text('05'), findsOneWidget);
+    expect(find.text('WebRip · HEVC_AAC · 简繁日内封'), findsOneWidget);
+    expect(find.text('第 1–12 话'), findsOneWidget);
+    // Nothing but the episode range is bracketed: the full title shows.
+    expect(find.text('[字幕组甲] 葬送的芙莉莲 [01-12 合集][1080p]'), findsOneWidget);
+  });
+
+  testWidgets('releases since the last visit are marked new once', (
+    tester,
+  ) async {
+    RssRelease release(String key, int day) => RssRelease(
+      key: key,
+      title: '[字幕组甲] 葬送的芙莉莲 [0$day]',
+      detailUri: Uri.parse('https://mikanani.me/Home/Episode/$key'),
+      episodeNumber: day.toDouble(),
+      publishedAt: DateTime.utc(2026, 10, day),
+      bangumiId: 400602,
+    );
+    final rss = _RssService()
+      ..resolvedShow = _show()
+      ..since = DateTime.utc(2026, 10, 3)
+      ..releases = [release('new', 5), release('old', 2)];
+    final torrent = _TorrentService();
+    addTearDown(rss.dispose);
+    addTearDown(torrent.close);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SubscriptionsPage(
+          service: rss,
+          torrentService: torrent,
+          subject: _subject(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('新'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.ancestor(of: find.text('第 5 话'), matching: find.byType(Row)),
+        matching: find.text('新'),
+      ),
+      findsWidgets,
+    );
+    expect(rss.viewed, [400602]);
+  });
 
   testWidgets(
     'leaving while matching cancels the UI request and ignores its late result',
@@ -285,35 +377,11 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('磁力引擎启动失败，请重试'), findsOneWidget);
-    expect(find.text('蜜柑番组已与当前季度确认匹配'), findsOneWidget);
-    await tester.ensureVisible(find.text('RSS 播放'));
+    expect(find.text('蜜柑 · 葬送的芙莉莲'), findsOneWidget);
+    await tester.ensureVisible(find.byTooltip('播放'));
     await tester.pumpAndSettle();
-    expect(
-      tester
-          .widget<FilledButton>(
-            find.ancestor(
-              of: find.text('RSS 播放'),
-              matching: find.byWidgetPredicate(
-                (widget) => widget is FilledButton,
-              ),
-            ),
-          )
-          .onPressed,
-      isNull,
-    );
-    expect(
-      tester
-          .widget<OutlinedButton>(
-            find.ancestor(
-              of: find.text('下载'),
-              matching: find.byWidgetPredicate(
-                (widget) => widget is OutlinedButton,
-              ),
-            ),
-          )
-          .onPressed,
-      isNull,
-    );
+    expect(_button(tester, '播放').onPressed, isNull);
+    expect(_button(tester, '下载').onPressed, isNull);
 
     final pending = Completer<void>();
     torrent.initializeFailure = null;
@@ -329,34 +397,10 @@ void main() {
     pending.complete();
     await tester.pumpAndSettle();
     expect(find.text('磁力引擎启动失败，请重试'), findsNothing);
-    await tester.ensureVisible(find.text('RSS 播放'));
+    await tester.ensureVisible(find.byTooltip('播放'));
     await tester.pumpAndSettle();
-    expect(
-      tester
-          .widget<FilledButton>(
-            find.ancestor(
-              of: find.text('RSS 播放'),
-              matching: find.byWidgetPredicate(
-                (widget) => widget is FilledButton,
-              ),
-            ),
-          )
-          .onPressed,
-      isNotNull,
-    );
-    expect(
-      tester
-          .widget<OutlinedButton>(
-            find.ancestor(
-              of: find.text('下载'),
-              matching: find.byWidgetPredicate(
-                (widget) => widget is OutlinedButton,
-              ),
-            ),
-          )
-          .onPressed,
-      isNotNull,
-    );
+    expect(_button(tester, '播放').onPressed, isNotNull);
+    expect(_button(tester, '下载').onPressed, isNotNull);
   });
 
   testWidgets('task progress updates build only visible task cards', (
@@ -419,8 +463,8 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('暂停'));
-      await tester.tap(find.text('暂停'));
+      await tester.tap(find.byTooltip('暂停'));
+      await tester.tap(find.byTooltip('暂停'));
       await tester.pump();
       expect(torrent.paused, ['one']);
       pause.complete();
@@ -432,7 +476,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('已暂停'), findsOneWidget);
       expect(find.text('other'), findsNothing);
-      await tester.tap(find.text('继续'));
+      await tester.tap(find.byTooltip('继续'));
       await tester.pumpAndSettle();
       expect(torrent.resumed, ['one']);
 
@@ -444,9 +488,7 @@ void main() {
     },
   );
 
-  testWidgets('task deletion defaults to preserving downloaded files', (
-    tester,
-  ) async {
+  testWidgets('deleting a task removes its downloaded files', (tester) async {
     final torrent = _TorrentService()
       ..taskList = [_task('one', state: TorrentTaskState.completed)];
     addTearDown(torrent.close);
@@ -454,15 +496,14 @@ void main() {
       MaterialApp(home: TorrentTasksPage(service: torrent)),
     );
     await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('任务选项'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('删除'));
     await tester.pumpAndSettle();
-    expect(
-      tester.widget<CheckboxListTile>(find.byType(CheckboxListTile)).value,
-      isFalse,
-    );
+    expect(find.byType(CheckboxListTile), findsNothing);
     await tester.tap(find.text('删除任务'));
     await tester.pumpAndSettle();
-    expect(torrent.deleted, [('one', false)]);
+    expect(torrent.deleted, [('one', true)]);
   });
 
   testWidgets(
@@ -507,9 +548,9 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.ensureVisible(find.text('下载'));
+      await tester.ensureVisible(find.byTooltip('下载'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('下载'));
+      await tester.tap(find.byTooltip('下载'));
       await tester.pump();
       await tester.tap(find.text('取消'));
       await tester.pump();
@@ -538,17 +579,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('当前平台暂不支持磁力播放'), findsOneWidget);
-      final button = tester.widget<FilledButton>(
-        find
-            .ancestor(
-              of: find.text('继续'),
-              matching: find.byWidgetPredicate(
-                (widget) => widget is FilledButton,
-              ),
-            )
-            .first,
-      );
-      expect(button.onPressed, isNull);
+      expect(_button(tester, '继续').onPressed, isNull);
     },
   );
 
@@ -641,7 +672,7 @@ void main() {
       MaterialApp(home: TorrentTasksPage(service: torrent)),
     );
     await tester.pumpAndSettle();
-    expect(find.text('任务未绑定番组，暂时不能在应用内播放'), findsOneWidget);
+    expect(find.text('未关联番剧，无法在应用内播放'), findsOneWidget);
     await tester.tap(find.text('1 个视频文件'));
     await tester.pumpAndSettle();
     expect(
@@ -805,6 +836,16 @@ void main() {
   }
 }
 
+IconButton _button(WidgetTester tester, String tooltip) =>
+    tester.widget<IconButton>(
+      find
+          .ancestor(
+            of: find.byTooltip(tooltip),
+            matching: find.byType(IconButton),
+          )
+          .first,
+    );
+
 class _Paths extends PathProviderPlatform {
   _Paths(this.path);
   final String path;
@@ -909,6 +950,15 @@ class _RssService extends ChangeNotifier implements RssSubscriptionService {
     selectedId = id;
     notifyListeners();
   }
+
+  DateTime? since;
+  final viewed = <int>[];
+  @override
+  DateTime? newSince(int bangumiId) => since;
+  @override
+  int newReleaseCount(int bangumiId) => 0;
+  @override
+  Future<void> markViewed(int bangumiId) async => viewed.add(bangumiId);
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

@@ -112,7 +112,7 @@ class _InfoActionsMenuState extends State<InfoActionsMenu> {
             '/subscriptions/',
             arguments: widget.bangumiItem,
           ),
-          label: 'RSS 资源与订阅',
+          label: 'RSS 资源',
         ),
         KazumiMenuItem(
           onPressed: _savingCover ? null : _saveCover,

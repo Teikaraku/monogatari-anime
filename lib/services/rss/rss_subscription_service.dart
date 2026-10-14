@@ -7,9 +7,11 @@ import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'mikan_rss_client.dart';
 import 'rss_subscription_repository.dart';
 import 'rss_refresh_coordinator.dart';
+import 'rss_sync.dart';
 
 export 'rss_models.dart';
 export 'rss_subscription_repository.dart';
+export 'rss_sync.dart';
 
 class RssSubscriptionService extends ChangeNotifier {
   RssSubscriptionService({
@@ -26,7 +28,16 @@ class RssSubscriptionService extends ChangeNotifier {
   final List<RssSubscription> _subscriptions = [];
   final List<RssRelease> _releases = [];
   final Map<int, String> _selected = {};
+  final Map<int, DateTime> _viewed = {};
+  final Map<String, RssSyncStamp> _stamps = {};
+  final Map<int, RssSyncStamp> _selectionStamps = {};
+  final _localEdits = StreamController<void>.broadcast();
   final Map<String, int> _revisions = {};
+
+  /// When each subscription's show mapping was last confirmed this session.
+  /// The mapping rarely changes, so refreshes re-read the show page daily.
+  final Map<String, DateTime> _verifiedAt = {};
+  static const _verifyEvery = Duration(hours: 24);
   final Set<CancelToken> _operations = {};
   int _loading = 0;
   bool _disposed = false;
@@ -34,6 +45,9 @@ class RssSubscriptionService extends ChangeNotifier {
   RssRefreshCoordinator? _autoRefresh;
 
   List<RssSubscription> get subscriptions => List.unmodifiable(_subscriptions);
+
+  /// Changes the user made on this device, for sync.
+  Stream<void> get localEdits => _localEdits.stream;
   List<RssRelease> get releases => List.unmodifiable(_releases);
   bool get isLoading => _loading > 0;
   String? get lastError => _lastError;
@@ -68,6 +82,9 @@ class RssSubscriptionService extends ChangeNotifier {
     _subscriptions.addAll(state.subscriptions.where(_validSubscription));
     final ids = _subscriptions.map((value) => value.id).toSet();
     _selected.addAll(state.selected);
+    _viewed.addAll(state.viewed);
+    _stamps.addAll(state.stamps);
+    _selectionStamps.addAll(state.selectionStamps);
     _releases.addAll(
       state.releases.where(
         (value) => ids.contains(value.subscriptionId) && _validRelease(value),
@@ -87,6 +104,34 @@ class RssSubscriptionService extends ChangeNotifier {
               value.isVerified,
         )
         .firstOrNull;
+  }
+
+  /// Releases published after this are new for the show: since its page was
+  /// last opened, or since the first subscription if it never was.
+  DateTime? newSince(int bangumiId) {
+    final viewed = _viewed[bangumiId];
+    if (viewed != null) return viewed;
+    final created = _subscriptions
+        .where((value) => value.bangumiId == bangumiId)
+        .map((value) => value.createdAt);
+    return created.isEmpty
+        ? null
+        : created.reduce((a, b) => a.isBefore(b) ? a : b);
+  }
+
+  int newReleaseCount(int bangumiId) {
+    final since = newSince(bangumiId);
+    if (since == null) return 0;
+    return releasesForSubject(
+      bangumiId,
+    ).where((release) => release.publishedAt?.isAfter(since) ?? false).length;
+  }
+
+  Future<void> markViewed(int bangumiId) async {
+    await initialize();
+    _viewed[bangumiId] = _clock();
+    await _save();
+    _notify();
   }
 
   List<RssRelease> releasesForSubject(
@@ -189,12 +234,16 @@ class RssSubscriptionService extends ChangeNotifier {
       lastRefreshedAt: _clock(),
     );
     _revisions[id] = (_revisions[id] ?? 0) + 1;
+    _verifiedAt[id] = _clock();
     _subscriptions.removeWhere((value) => value.id == id);
     _subscriptions.insert(0, subscription);
     _selected[subject.id] = id;
+    _stamp(id);
+    _stampSelection(subject.id);
     _replaceReleases(subscription, feed.releases);
     await _save();
     _notify();
+    _edited();
     return subscription;
   }, cancelToken);
 
@@ -218,88 +267,111 @@ class RssSubscriptionService extends ChangeNotifier {
     return subscribe(subject, show, group, cancelToken: cancelToken);
   }
 
-  Future<void> refresh({
-    String? subscriptionId,
-    CancelToken? cancelToken,
-  }) => _operation((token) async {
-    await initialize();
-    final selected = _subscriptions
-        .where(
-          (value) =>
-              value.enabled &&
-              (subscriptionId == null || value.id == subscriptionId),
-        )
-        .toList();
-    final updates =
-        <
-          ({
-            RssSubscription original,
-            int revision,
-            RssSubscription updated,
-            List<RssRelease>? releases,
-          })
-        >[];
-    var index = 0;
-    Future<void> worker() async {
-      while (index < selected.length) {
-        _checkCancelled(token);
-        final old = selected[index++];
-        if (!_subscriptions.any(
-          (value) => identical(value, old) && value.enabled,
-        )) {
-          continue;
-        }
-        final revision = (_revisions[old.id] ?? 0) + 1;
-        _revisions[old.id] = revision;
-        try {
-          final show = await _client.getShow(old.mikanId, cancelToken: token);
-          if (show.bangumiId != old.bangumiId ||
-              !show.groups.any((group) => group.id == old.subtitleGroupId)) {
-            throw const RssException('原字幕组或番剧映射已改变，请重新绑定');
+  Future<void> refresh({String? subscriptionId, CancelToken? cancelToken}) =>
+      _operation(
+        (token) async {
+          await initialize();
+          final selected = _subscriptions
+              .where(
+                (value) =>
+                    value.enabled &&
+                    (subscriptionId == null || value.id == subscriptionId),
+              )
+              .toList();
+          final updates =
+              <
+                ({
+                  RssSubscription original,
+                  int revision,
+                  RssSubscription updated,
+                  List<RssRelease>? releases,
+                })
+              >[];
+          var index = 0;
+          Future<void> worker() async {
+            while (index < selected.length) {
+              _checkCancelled(token);
+              final old = selected[index++];
+              if (!_subscriptions.any(
+                (value) => identical(value, old) && value.enabled,
+              )) {
+                continue;
+              }
+              final revision = (_revisions[old.id] ?? 0) + 1;
+              _revisions[old.id] = revision;
+              try {
+                final verified = _verifiedAt[old.id];
+                final verify =
+                    verified == null ||
+                    _clock().difference(verified) >= _verifyEvery;
+                if (verify) {
+                  final show = await _client.getShow(
+                    old.mikanId,
+                    cancelToken: token,
+                  );
+                  if (show.bangumiId != old.bangumiId ||
+                      !show.groups.any(
+                        (group) => group.id == old.subtitleGroupId,
+                      )) {
+                    throw const RssException('番剧或字幕组在蜜柑上已变化，请删除后重新订阅');
+                  }
+                }
+                final feed = await _client.previewFeed(
+                  old.feedUri,
+                  cancelToken: token,
+                  resolveShow: false,
+                );
+                _checkCancelled(token);
+                if (verify) _verifiedAt[old.id] = _clock();
+                if (!_stillCurrent(old, revision)) continue;
+                updates.add((
+                  original: old,
+                  revision: revision,
+                  updated: old.copyWith(
+                    lastRefreshedAt: _clock(),
+                    clearError: true,
+                  ),
+                  releases: feed.releases,
+                ));
+              } catch (error) {
+                _checkCancelled(token);
+                if (!_stillCurrent(old, revision)) continue;
+                updates.add((
+                  original: old,
+                  revision: revision,
+                  // Client errors are already safe to show and say what to do.
+                  updated: old.copyWith(
+                    lastError: error is RssException
+                        ? error.message
+                        : 'RSS 刷新失败，请稍后重试',
+                  ),
+                  releases: null,
+                ));
+              }
+            }
           }
-          final feed = await _client.previewFeed(
-            old.feedUri,
-            cancelToken: token,
-          );
-          _checkCancelled(token);
-          if (!_stillCurrent(old, revision)) continue;
-          updates.add((
-            original: old,
-            revision: revision,
-            updated: old.copyWith(lastRefreshedAt: _clock(), clearError: true),
-            releases: feed.releases,
-          ));
-        } catch (_) {
-          _checkCancelled(token);
-          if (!_stillCurrent(old, revision)) continue;
-          updates.add((
-            original: old,
-            revision: revision,
-            updated: old.copyWith(lastError: 'RSS 刷新失败，请稍后重试'),
-            releases: null,
-          ));
-        }
-      }
-    }
 
-    await Future.wait([
-      for (var count = 0; count < 3 && count < selected.length; count++)
-        worker(),
-    ]);
-    _checkCancelled(token);
-    for (final update in updates) {
-      if (!_stillCurrent(update.original, update.revision)) continue;
-      _subscriptions[_subscriptions.indexWhere(
-            (value) => value.id == update.original.id,
-          )] =
-          update.updated;
-      if (update.releases != null) {
-        _replaceReleases(update.updated, update.releases!);
-      }
-    }
-    await _save();
-    _notify();
-  }, cancelToken);
+          await Future.wait([
+            for (var count = 0; count < 3 && count < selected.length; count++)
+              worker(),
+          ]);
+          _checkCancelled(token);
+          for (final update in updates) {
+            if (!_stillCurrent(update.original, update.revision)) continue;
+            _subscriptions[_subscriptions.indexWhere(
+                  (value) => value.id == update.original.id,
+                )] =
+                update.updated;
+            if (update.releases != null) {
+              _replaceReleases(update.updated, update.releases!);
+            }
+          }
+          await _save();
+          _notify();
+        },
+        cancelToken,
+        reportError: true,
+      );
 
   Future<void> remove(String id) async {
     await initialize();
@@ -310,9 +382,11 @@ class RssSubscriptionService extends ChangeNotifier {
     if (removed != null && _selected[removed.bangumiId] == id) {
       _selected.remove(removed.bangumiId);
     }
+    if (removed != null) _stamp(id, deleted: true);
     // No selection remains; another subscribed group is never chosen silently.
     await _save();
     _notify();
+    if (removed != null) _edited();
   }
 
   Future<void> setEnabled(String id, bool enabled) async {
@@ -322,9 +396,15 @@ class RssSubscriptionService extends ChangeNotifier {
     final subscription = _subscriptions[index].copyWith(enabled: enabled);
     _subscriptions[index] = subscription;
     _revisions[id] = (_revisions[id] ?? 0) + 1;
-    if (enabled) _selected[subscription.bangumiId] = id;
+    // Resuming a group never replaces the one picked for playback.
+    if (enabled && subscriptionForSubject(subscription.bangumiId) == null) {
+      _selected[subscription.bangumiId] = id;
+      _stampSelection(subscription.bangumiId);
+    }
+    _stamp(id);
     await _save();
     _notify();
+    _edited();
   }
 
   Future<void> selectSubscription(String id) async {
@@ -334,8 +414,149 @@ class RssSubscriptionService extends ChangeNotifier {
         .firstOrNull;
     if (subscription == null) throw const RssException('字幕组订阅不可用');
     _selected[subscription.bangumiId] = id;
+    _stampSelection(subscription.bangumiId);
     await _save();
     _notify();
+    _edited();
+  }
+
+  void _stamp(String id, {bool deleted = false}) => _stamps[id] = (
+    at: _clock().millisecondsSinceEpoch,
+    device: null,
+    deleted: deleted,
+  );
+
+  void _stampSelection(int bangumiId) => _selectionStamps[bangumiId] = (
+    at: _clock().millisecondsSinceEpoch,
+    device: null,
+    deleted: false,
+  );
+
+  void _edited() {
+    if (!_localEdits.isClosed) _localEdits.add(null);
+  }
+
+  /// This device's subscriptions and picks as [deviceId] publishes them.
+  RssSyncState exportSync(String deviceId) {
+    final present = {for (final value in _subscriptions) value.id};
+    return RssSyncState(
+      entries: [
+        for (final value in _subscriptions)
+          RssSyncEntry(
+            id: value.id,
+            updatedAt:
+                _stamps[value.id]?.at ?? value.createdAt.millisecondsSinceEpoch,
+            deviceId: _stamps[value.id]?.device ?? deviceId,
+            subscription: _syncJson(value),
+          ),
+        for (final MapEntry(:key, :value) in _stamps.entries)
+          if (value.deleted && !present.contains(key))
+            RssSyncEntry(
+              id: key,
+              updatedAt: value.at,
+              deviceId: value.device ?? deviceId,
+            ),
+      ],
+      selections: [
+        for (final MapEntry(:key, :value) in _selected.entries)
+          RssSyncSelection(
+            bangumiId: key,
+            subscriptionId: value,
+            updatedAt: _selectionStamps[key]?.at ?? 0,
+            deviceId: _selectionStamps[key]?.device ?? deviceId,
+          ),
+      ],
+    );
+  }
+
+  static Map<String, dynamic> _syncJson(RssSubscription value) => value.toJson()
+    ..remove('lastRefreshedAt')
+    ..remove('lastError');
+
+  /// Applies whatever [remote] holds that is newer than this device's copy and
+  /// returns the merged state to publish. New subscriptions fetch their feeds.
+  Future<RssSyncState> mergeSyncState(
+    RssSyncState remote,
+    String deviceId,
+  ) async {
+    await initialize();
+    final local = exportSync(deviceId);
+    final merged = local.merge(remote);
+    final added = <String>[];
+    var changed = false;
+    for (final entry in merged.entries.values) {
+      final mine = local.entries[entry.id];
+      if (mine != null && mine.sameVersion(entry)) continue;
+      final index = _subscriptions.indexWhere((value) => value.id == entry.id);
+      if (entry.deleted) {
+        if (index >= 0) {
+          final removed = _subscriptions.removeAt(index);
+          _releases.removeWhere((value) => value.subscriptionId == entry.id);
+          _revisions[entry.id] = (_revisions[entry.id] ?? 0) + 1;
+          if (_selected[removed.bangumiId] == entry.id) {
+            _selected.remove(removed.bangumiId);
+          }
+        }
+      } else {
+        final RssSubscription incoming;
+        try {
+          incoming = RssSubscription.fromJson(entry.subscription!);
+        } catch (_) {
+          continue;
+        }
+        if (incoming.id != entry.id || !_validSubscription(incoming)) continue;
+        if (index >= 0) {
+          final old = _subscriptions[index];
+          _subscriptions[index] = RssSubscription(
+            id: incoming.id,
+            subject: incoming.subject,
+            show: incoming.show,
+            group: incoming.group,
+            createdAt: incoming.createdAt,
+            enabled: incoming.enabled,
+            lastRefreshedAt: old.lastRefreshedAt,
+            lastError: old.lastError,
+          );
+          _revisions[entry.id] = (_revisions[entry.id] ?? 0) + 1;
+        } else {
+          if (_subscriptions.length >= 128) continue;
+          _subscriptions.insert(0, incoming);
+          added.add(incoming.id);
+        }
+      }
+      _stamps[entry.id] = (
+        at: entry.updatedAt,
+        device: entry.deviceId == deviceId ? null : entry.deviceId,
+        deleted: entry.deleted,
+      );
+      changed = true;
+    }
+    for (final selection in merged.selections.values) {
+      final mine = local.selections[selection.bangumiId];
+      if (mine != null && mine.sameVersion(selection)) continue;
+      if (!_subscriptions.any(
+        (value) =>
+            value.id == selection.subscriptionId &&
+            value.bangumiId == selection.bangumiId,
+      )) {
+        continue;
+      }
+      _selected[selection.bangumiId] = selection.subscriptionId;
+      _selectionStamps[selection.bangumiId] = (
+        at: selection.updatedAt,
+        device: selection.deviceId == deviceId ? null : selection.deviceId,
+        deleted: false,
+      );
+      changed = true;
+    }
+    if (changed) {
+      await _save();
+      _notify();
+    }
+    for (final id in added) {
+      unawaited(refresh(subscriptionId: id).catchError((Object _) {}));
+    }
+    return merged;
   }
 
   bool _stillCurrent(RssSubscription old, int revision) =>
@@ -357,13 +578,19 @@ class RssSubscriptionService extends ChangeNotifier {
       subscriptions: List.of(_subscriptions),
       releases: List.of(_releases),
       selected: Map.of(_selected),
+      viewed: Map.of(_viewed),
+      stamps: Map.of(_stamps),
+      selectionStamps: Map.of(_selectionStamps),
     ),
   );
 
+  /// Pages show their own request failures; only a background refresh that
+  /// fails as a whole is reported through [lastError].
   Future<T> _operation<T>(
     Future<T> Function(CancelToken) body,
-    CancelToken? caller,
-  ) async {
+    CancelToken? caller, {
+    bool reportError = false,
+  }) async {
     if (_disposed) throw const RssException('RSS 服务已关闭');
     _checkCancelled(caller);
     final token = CancelToken();
@@ -377,7 +604,7 @@ class RssSubscriptionService extends ChangeNotifier {
     try {
       return await body(token);
     } catch (_) {
-      if (!token.isCancelled) _lastError = 'RSS 操作失败，请稍后重试';
+      if (reportError && !token.isCancelled) _lastError = 'RSS 刷新失败，请稍后重试';
       rethrow;
     } finally {
       await cancellation?.cancel();
@@ -415,6 +642,7 @@ class RssSubscriptionService extends ChangeNotifier {
       token.cancel('RSS 服务已关闭');
     }
     _client.dispose();
+    unawaited(_localEdits.close());
     super.dispose();
   }
 }

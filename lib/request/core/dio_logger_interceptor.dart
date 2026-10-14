@@ -27,11 +27,14 @@ class DioLoggerInterceptor extends Interceptor {
     final elapsed = _elapsed(err.requestOptions);
     final statusCode = err.response?.statusCode;
     final status = statusCode == null ? err.type.name : statusCode.toString();
-    KazumiLogger().w(
-      'HTTP: <-- $status ${err.requestOptions.method} ${err.requestOptions.uri}'
-      '${elapsed == null ? '' : ' ${elapsed}ms'}',
-      error: err.message,
-    );
+    final message =
+        'HTTP: <-- $status ${err.requestOptions.method} ${err.requestOptions.uri}'
+        '${elapsed == null ? '' : ' ${elapsed}ms'}';
+    if (err.type == DioExceptionType.cancel) {
+      KazumiLogger().d(message);
+    } else {
+      KazumiLogger().w(message, error: err.message);
+    }
     handler.next(err);
   }
 

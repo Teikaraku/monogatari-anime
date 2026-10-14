@@ -24,6 +24,7 @@ import 'package:kazumi/pages/settings/sync/webdav_sync_page.dart';
 import 'package:kazumi/pages/settings/theme_settings_page.dart';
 import 'package:kazumi/pages/settings/update_settings.dart';
 import 'package:kazumi/request/config/api_endpoints.dart';
+import 'package:kazumi/services/sync/rss_sync_service.dart';
 import 'package:kazumi/services/sync/danmaku_shield_sync_service.dart';
 
 final settingsModule = createModule(
@@ -41,6 +42,7 @@ final settingsModule = createModule(
           ..route('/webdav/',
               child: (context, state) => WebDavSyncPage(
                     danmakuShieldSync: inject<DanmakuShieldSyncService>(),
+                    rssSync: inject<RssSyncService>(),
                   ))
           ..route('/webdav/editor',
               child: (context, state) => const WebDavServerPage())

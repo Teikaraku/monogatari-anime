@@ -54,14 +54,19 @@ class _MyPageState extends State<MyPage> {
   void _open(MyDestination destination) =>
       context.pushNamed(switch (destination) {
         MyDestination.theme => '/settings/theme',
+        MyDestination.interface => '/settings/interface',
         MyDestination.player => '/settings/player',
         MyDestination.danmaku => '/settings/danmaku/',
+        MyDestination.keyboard => '/settings/keyboard',
+        MyDestination.downloadSettings => '/settings/download-settings',
         MyDestination.history => '/settings/history/',
         MyDestination.downloads => '/settings/download/',
         MyDestination.subscriptions => '/subscriptions/',
         MyDestination.torrentTasks => '/torrent-tasks/',
         MyDestination.stats => '/settings/history/stats',
         MyDestination.sync => '/settings/sync',
+        MyDestination.proxy => '/settings/proxy/',
+        MyDestination.update => '/settings/update',
         MyDestination.storage => '/settings/storage',
         MyDestination.about => '/settings/about/',
       });
@@ -76,9 +81,6 @@ class _MyPageState extends State<MyPage> {
         needTopOffset: false,
         backgroundColor: background,
         contentWidth: MySpaceView.contentWidthFor,
-        actions: [
-          MySettingsButton(onTap: () => context.pushNamed('/settings/')),
-        ],
       ),
       body: SafeArea(
         top: false,

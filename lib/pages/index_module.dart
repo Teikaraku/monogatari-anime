@@ -24,6 +24,7 @@ import 'package:kazumi/services/shaders/shader_asset_service.dart';
 import 'package:kazumi/services/sync/danmaku_shield_sync_service.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/pages/subscriptions/subscriptions_page.dart';
+import 'package:kazumi/services/sync/rss_sync_service.dart';
 import 'package:kazumi/pages/torrent/torrent_tasks_page.dart';
 import 'package:kazumi/services/rss/rss_subscription_service.dart';
 import 'package:kazumi/services/torrent/torrent_service.dart';
@@ -88,6 +89,7 @@ final indexModule = createModule(
             final service = inject<RssSubscriptionService>();
             await service.initialize();
             await service.startAutoRefresh();
+            inject<RssSyncService>().start();
           },
         ),
         transition: TransitionType.none,

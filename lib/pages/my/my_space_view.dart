@@ -8,14 +8,19 @@ import 'package:kazumi/utils/theme.dart';
 
 enum MyDestination {
   theme,
+  interface,
   player,
   danmaku,
+  keyboard,
+  downloadSettings,
   history,
   downloads,
   subscriptions,
   torrentTasks,
   stats,
   sync,
+  proxy,
+  update,
   storage,
   about,
 }
@@ -76,20 +81,6 @@ class MySpaceView extends StatelessWidget {
                   MyDestination.downloads,
                 ),
                 _entry(
-                  'RSS 订阅',
-                  '订阅番组与字幕组更新',
-                  Icons.rss_feed_rounded,
-                  _Tint.orange,
-                  MyDestination.subscriptions,
-                ),
-                _entry(
-                  '磁力任务',
-                  '查看缓冲与下载进度',
-                  Icons.downloading_rounded,
-                  _Tint.teal,
-                  MyDestination.torrentTasks,
-                ),
-                _entry(
                   '观看统计',
                   stats.watchedEpisodeCount == 0
                       ? '观看热力图'
@@ -97,6 +88,25 @@ class MySpaceView extends StatelessWidget {
                   Icons.insights_rounded,
                   _Tint.purple,
                   MyDestination.stats,
+                ),
+              ],
+            );
+            final rss = ContentSection.group(
+              title: 'RSS',
+              children: [
+                _entry(
+                  'RSS 订阅',
+                  '番组与字幕组更新',
+                  Icons.rss_feed_rounded,
+                  _Tint.orange,
+                  MyDestination.subscriptions,
+                ),
+                _entry(
+                  '磁力任务',
+                  '缓冲与下载进度',
+                  Icons.hub_rounded,
+                  _Tint.teal,
+                  MyDestination.torrentTasks,
                 ),
               ],
             );
@@ -111,9 +121,16 @@ class MySpaceView extends StatelessWidget {
                   MyDestination.theme,
                 ),
                 _entry(
+                  '界面设置',
+                  '启动、窗口行为与展示信息',
+                  Icons.pages_rounded,
+                  _Tint.teal,
+                  MyDestination.interface,
+                ),
+                _entry(
                   '播放设置',
                   '解码、渲染与播放行为',
-                  Icons.play_arrow_rounded,
+                  Icons.display_settings_rounded,
                   _Tint.green,
                   MyDestination.player,
                 ),
@@ -124,22 +141,50 @@ class MySpaceView extends StatelessWidget {
                   _Tint.indigo,
                   MyDestination.danmaku,
                 ),
+                _entry(
+                  '操作设置',
+                  '播放器按键映射',
+                  Icons.keyboard_rounded,
+                  _Tint.gray,
+                  MyDestination.keyboard,
+                ),
+                _entry(
+                  '下载设置',
+                  '并发数与弹幕缓存',
+                  Icons.downloading_rounded,
+                  monogatariPink,
+                  MyDestination.downloadSettings,
+                ),
               ],
             );
             final data = ContentSection.group(
               title: '数据与应用',
               children: [
                 _entry(
-                  '同步备份',
-                  '跨设备同步数据',
-                  Icons.cloud_sync_rounded,
-                  _Tint.teal,
+                  '同步设置',
+                  '追番状态与多设备同步',
+                  Icons.cloud_rounded,
+                  _Tint.blue,
                   MyDestination.sync,
                 ),
                 _entry(
-                  '存储管理',
-                  '缓存与日志',
-                  Icons.cleaning_services_rounded,
+                  '网络设置',
+                  '访问加速与代理',
+                  Icons.language_rounded,
+                  _Tint.green,
+                  MyDestination.proxy,
+                ),
+                _entry(
+                  '更新设置',
+                  '应用更新检查',
+                  Icons.update_rounded,
+                  _Tint.orange,
+                  MyDestination.update,
+                ),
+                _entry(
+                  '存储与日志',
+                  '图片缓存与错误日志',
+                  Icons.storage_rounded,
                   _Tint.gray,
                   MyDestination.storage,
                 ),
@@ -152,6 +197,19 @@ class MySpaceView extends StatelessWidget {
                 ),
               ],
             );
+            Widget pair(Widget start, Widget end) => wide
+                ? Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: start),
+                      const SizedBox(width: 16),
+                      Expanded(child: end),
+                    ],
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [start, const SizedBox(height: 28), end],
+                  );
             return SingleChildScrollView(
               key: const PageStorageKey('my-space'),
               padding: const EdgeInsets.fromLTRB(
@@ -166,22 +224,9 @@ class MySpaceView extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      watching,
+                      pair(watching, rss),
                       const SizedBox(height: 28),
-                      if (wide)
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(child: preferences),
-                            const SizedBox(width: 16),
-                            Expanded(child: data),
-                          ],
-                        )
-                      else ...[
-                        preferences,
-                        const SizedBox(height: 28),
-                        data,
-                      ],
+                      pair(preferences, data),
                     ],
                   ),
                 ),
@@ -206,19 +251,4 @@ class MySpaceView extends StatelessWidget {
     description: description,
     onTap: () => onOpen(destination),
   );
-}
-
-class MySettingsButton extends StatelessWidget {
-  const MySettingsButton({super.key, required this.onTap});
-
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return IconButton(
-      tooltip: '全部设置',
-      onPressed: onTap,
-      icon: const Icon(Icons.settings_outlined),
-    );
-  }
 }

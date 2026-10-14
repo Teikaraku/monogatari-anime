@@ -4,6 +4,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kazumi/services/player/automatic_playback_runner.dart';
 
 void main() {
+  test('native TCP read errors from real logs trigger fallback', () {
+    for (final error in ['tcp: ffurl_read returned 0xffffffc4',
+        'tcp: Connection to tcp://video.test:443 failed: Connection refused']) {
+      expect(AutomaticPlaybackRunner.isFatalMediaError(error), isTrue);
+    }
+  });
   const providers = ['1080资源站', '暴风', '量子'];
 
   test(

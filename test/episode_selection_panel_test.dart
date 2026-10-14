@@ -67,6 +67,25 @@ void main() {
     expect(selected, [(2, 1)]);
   });
 
+  testWidgets('the whole episode row is tappable, not just its text', (
+    tester,
+  ) async {
+    final selected = <(int, int)>[];
+    await mount(
+      tester,
+      onSelected: (episode, road) => selected.add((episode, road)),
+    );
+
+    final row = find.ancestor(
+      of: find.text('第一组第 2 集'),
+      matching: find.byType(InkWell),
+    );
+    expect(tester.getSize(row).width,
+        tester.getSize(find.byType(EpisodeSelectionPanel)).width - 32);
+    await tester.tapAt(tester.getTopRight(row) + const Offset(-8, 25));
+    expect(selected, [(2, 0)]);
+  });
+
   testWidgets('online episode list follows an automatic source change', (
     tester,
   ) async {

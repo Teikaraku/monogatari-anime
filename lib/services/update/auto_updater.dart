@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:kazumi/bean/dialog/dialog_helper.dart';
 import 'package:kazumi/request/config/api_endpoints.dart';
+import 'package:kazumi/request/core/network_exception.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/services/update/github_release_metadata.dart';
 import 'package:kazumi/services/update/startup_update_check.dart';
@@ -66,16 +67,29 @@ class AutoUpdater {
     );
   }
 
-  Future<void> autoCheckForUpdates() => _startupCheck.run(
-    checkForUpdate: () async {
-      try {
-        final update = await checkForUpdates();
-        if (update != null) await _showUpdateDialog(update);
-      } catch (error) {
-        KazumiLogger().w('Update: automatic GitHub check failed', error: error);
-      }
-    },
-  );
+  Future<void> autoCheckForUpdates() async {
+    try {
+      await _startupCheck.run(
+        shouldRetry: (error) =>
+            error is NetworkException &&
+            const {
+              NetworkExceptionType.connectionError,
+              NetworkExceptionType.connectionTimeout,
+              NetworkExceptionType.receiveTimeout,
+              NetworkExceptionType.sendTimeout,
+            }.contains(error.type),
+        checkForUpdate: () async {
+          final update = await checkForUpdates();
+          if (update != null) await _showUpdateDialog(update);
+        },
+      );
+    } catch (error) {
+      KazumiLogger().w(
+        'Update: automatic GitHub check failed after retry',
+        error: error,
+      );
+    }
+  }
 
   Future<void> manualCheckForUpdates() async {
     try {

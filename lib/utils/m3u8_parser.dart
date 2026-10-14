@@ -94,7 +94,9 @@ class M3u8Parser {
   }
 
   static M3u8MasterPlaylist parseMasterPlaylist(
-      String content, String baseUrl) {
+    String content,
+    String baseUrl,
+  ) {
     final lines = content.split('\n').map((l) => l.trim()).toList();
     final variants = <M3u8Variant>[];
 
@@ -110,16 +112,18 @@ class M3u8Parser {
           bandwidth = int.parse(bandwidthMatch.group(1)!);
         }
 
-        final resolutionMatch =
-            RegExp(r'RESOLUTION=([^\s,]+)').firstMatch(attrs);
+        final resolutionMatch = RegExp(
+          r'RESOLUTION=([^\s,]+)',
+        ).firstMatch(attrs);
         if (resolutionMatch != null) {
           resolution = resolutionMatch.group(1);
         }
 
         if (i + 1 < lines.length && !lines[i + 1].startsWith('#')) {
           final uri = resolveUrl(baseUrl, lines[i + 1]);
-          variants.add(M3u8Variant(
-              bandwidth: bandwidth, resolution: resolution, uri: uri));
+          variants.add(
+            M3u8Variant(bandwidth: bandwidth, resolution: resolution, uri: uri),
+          );
         }
       }
     }
@@ -137,13 +141,19 @@ class M3u8Parser {
     int currentDiscontinuityGroup = 0;
     M3u8Key? currentKey;
     double currentDuration = 0;
+    var mediaSequence = BigInt.zero;
 
     for (int i = 0; i < lines.length; i++) {
       final line = lines[i];
 
       if (line.startsWith('#EXT-X-TARGETDURATION:')) {
-        targetDuration =
-            double.parse(line.substring('#EXT-X-TARGETDURATION:'.length));
+        targetDuration = double.parse(
+          line.substring('#EXT-X-TARGETDURATION:'.length),
+        );
+      } else if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
+        mediaSequence = BigInt.parse(
+          line.substring('#EXT-X-MEDIA-SEQUENCE:'.length),
+        );
       } else if (line == '#EXT-X-ENDLIST') {
         hasEndList = true;
       } else if (line == '#EXT-X-PLAYLIST-TYPE:VOD') {
@@ -159,12 +169,20 @@ class M3u8Parser {
         currentDuration = double.parse(durationStr);
       } else if (line.isNotEmpty && !line.startsWith('#')) {
         final uri = resolveUrl(baseUrl, line);
-        segments.add(M3u8Segment(
-          duration: currentDuration,
-          uri: uri,
-          discontinuityGroup: currentDiscontinuityGroup,
-          key: currentKey,
-        ));
+        segments.add(
+          M3u8Segment(
+            duration: currentDuration,
+            uri: uri,
+            discontinuityGroup: currentDiscontinuityGroup,
+            key: currentKey?.method == 'AES-128' && currentKey!.iv == null
+                ? M3u8Key(
+                    method: currentKey.method,
+                    uri: currentKey.uri,
+                    iv: '0x${(mediaSequence + BigInt.from(segments.length)).toRadixString(16).padLeft(32, '0')}',
+                  )
+                : currentKey,
+          ),
+        );
         currentDuration = 0;
       }
     }
@@ -241,7 +259,8 @@ class M3u8Parser {
         } else {
           final localUri = keyUriToLocal[seg.key!.uri] ?? seg.key!.uri;
           final keySb = StringBuffer(
-              '#EXT-X-KEY:METHOD=${seg.key!.method},URI="$localUri"');
+            '#EXT-X-KEY:METHOD=${seg.key!.method},URI="$localUri"',
+          );
           if (seg.key!.iv != null) {
             keySb.write(',IV=${seg.key!.iv}');
           }
@@ -279,12 +298,14 @@ class M3u8Parser {
 
     for (final seg in segments) {
       if (!_isM3u8Url(seg.uri)) {
-        result.add(M3u8Segment(
-          duration: seg.duration,
-          uri: seg.uri,
-          discontinuityGroup: seg.discontinuityGroup + groupOffset,
-          key: seg.key,
-        ));
+        result.add(
+          M3u8Segment(
+            duration: seg.duration,
+            uri: seg.uri,
+            discontinuityGroup: seg.discontinuityGroup + groupOffset,
+            key: seg.key,
+          ),
+        );
         continue;
       }
 
@@ -309,24 +330,28 @@ class M3u8Parser {
         }
 
         for (final ns in resolved) {
-          result.add(M3u8Segment(
-            duration: ns.duration,
-            uri: ns.uri,
-            discontinuityGroup: ns.discontinuityGroup + nestedBase,
-            key: ns.key,
-          ));
+          result.add(
+            M3u8Segment(
+              duration: ns.duration,
+              uri: ns.uri,
+              discontinuityGroup: ns.discontinuityGroup + nestedBase,
+              key: ns.key,
+            ),
+          );
         }
 
         // 后续 segment 的 group 需要额外偏移，避免碰撞
         groupOffset += maxNestedGroup;
       } catch (e) {
         // 获取/解析失败，保留原始 segment
-        result.add(M3u8Segment(
-          duration: seg.duration,
-          uri: seg.uri,
-          discontinuityGroup: seg.discontinuityGroup + groupOffset,
-          key: seg.key,
-        ));
+        result.add(
+          M3u8Segment(
+            duration: seg.duration,
+            uri: seg.uri,
+            discontinuityGroup: seg.discontinuityGroup + groupOffset,
+            key: seg.key,
+          ),
+        );
       }
     }
 

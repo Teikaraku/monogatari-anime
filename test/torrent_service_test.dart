@@ -161,7 +161,8 @@ void main() {
         engine.data,
       );
       await cached.close();
-      await expectLater(service.resume(task.id), throwsStateError);
+      await service.resume(task.id);
+      expect(service.tasks.single.state, TorrentTaskState.queued);
     },
   );
 
@@ -190,7 +191,7 @@ void main() {
     },
   );
 
-  test('restored download tasks retain identity and start paused', () async {
+  test('restored download tasks retain identity and automatically continue', () async {
     final task = await service.add(
       source,
       bangumiId: 123,
@@ -207,11 +208,14 @@ void main() {
     await service.initialize();
     final restored = service.tasks.single;
     expect(restored.id, task.id);
-    expect(restored.state, TorrentTaskState.paused);
+    expect(restored.state, TorrentTaskState.queued);
     expect(restored.bangumiId, 123);
     expect(restored.releaseKey, 'release-2');
     expect(restored.episodeNumber, 2);
-    expect(engine.handles, isEmpty);
+    for (var i = 0; i < 100 && engine.handles.isEmpty; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(engine.handles, isNotEmpty);
     await service.clearInactiveCache();
     expect(service.tasks, hasLength(1));
   });
@@ -478,7 +482,7 @@ void main() {
       expect(engine.handles.where((handle) => !handle.closed), hasLength(2));
       expect(
         service.tasks.firstWhere((task) => task.id == first.id).state,
-        TorrentTaskState.paused,
+        TorrentTaskState.queued,
       );
       expect(
         await File(
@@ -490,6 +494,101 @@ void main() {
       expect(service.tasks.map((task) => task.id), [first.id, second.id]);
     },
   );
+
+  Future<TorrentTaskSnapshot> addTask(int number) async {
+    engine.infoHash = '$number'.padLeft(40, '0');
+    return service.add(source.replace(path: '/$number.torrent'));
+  }
+
+  Future<void> waitFor(bool Function() condition) async {
+    for (var i = 0; i < 100 && !condition(); i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(condition(), isTrue);
+  }
+
+  test('a third download queues without interrupting the first two', () async {
+    engine.downloadedBytes = 0;
+    final tasks = [await addTask(1), await addTask(2), await addTask(3)];
+    for (final task in tasks) {
+      await service.startDownload(task.id);
+    }
+    expect(service.tasks.map((task) => task.state), [
+      TorrentTaskState.downloading,
+      TorrentTaskState.downloading,
+      TorrentTaskState.queued,
+    ]);
+    expect(engine.handles.where((handle) => !handle.closed), hasLength(2));
+    await service.pause(tasks.first.id);
+    await waitFor(
+      () => service.tasks.last.state == TorrentTaskState.downloading,
+    );
+    expect(service.tasks.first.state, TorrentTaskState.paused);
+    expect(engine.handles.where((handle) => !handle.closed), hasLength(2));
+  });
+
+  test(
+    'playback announces preemption and restores the waiting download',
+    () async {
+      engine.downloadedBytes = 0;
+      final first = await addTask(1),
+          second = await addTask(2),
+          third = await addTask(3);
+      await service.startDownload(first.id);
+      await service.startDownload(second.id);
+      final notice = service.notices.first;
+      final lease = await service.openStream(third.id, 0);
+      expect(await notice, contains('自动继续'));
+      expect(service.tasks.first.state, TorrentTaskState.queued);
+      await lease.close();
+      await waitFor(
+        () => service.tasks.first.state == TorrentTaskState.downloading,
+      );
+      expect(
+        service.tasks.map((task) => task.state),
+        everyElement(TorrentTaskState.downloading),
+      );
+    },
+  );
+
+  test(
+    'Wi-Fi restoration resumes automatic waits but not manual pauses',
+    () async {
+      engine.downloadedBytes = 0;
+      final first = await addTask(1), second = await addTask(2);
+      await service.startDownload(first.id);
+      await service.startDownload(second.id);
+      allowed = false;
+      await service.refreshNetworkPolicy();
+      expect(
+        service.tasks.map((task) => task.state),
+        everyElement(TorrentTaskState.queued),
+      );
+      expect(engine.handles.where((handle) => !handle.closed), isEmpty);
+      await service.pause(second.id);
+      allowed = true;
+      await service.refreshNetworkPolicy();
+      expect(service.tasks.first.state, TorrentTaskState.downloading);
+      expect(service.tasks.last.state, TorrentTaskState.paused);
+    },
+  );
+
+  test('pausing all queued work cancels its automatic continuation', () async {
+    engine.downloadedBytes = 0;
+    final tasks = [await addTask(1), await addTask(2), await addTask(3)];
+    for (final task in tasks) {
+      await service.startDownload(task.id);
+    }
+    for (final task in tasks.reversed) {
+      await service.pause(task.id);
+    }
+    await service.refreshNetworkPolicy();
+    expect(
+      service.tasks.map((task) => task.state),
+      everyElement(TorrentTaskState.paused),
+    );
+    expect(engine.handles.where((handle) => !handle.closed), isEmpty);
+  });
 }
 
 class _Engine implements TorrentEngine {
@@ -508,15 +607,16 @@ class _Engine implements TorrentEngine {
   bool failOpen = false;
   bool failResume = false;
   bool batch = false;
+  int downloadedBytes = 64;
   String infoHash = '0123456789012345678901234567890123456789';
   bool readCancelled = false;
   int resolutions = 0;
   List<TorrentFileInfo> get files => [
-    const TorrentFileInfo(
+    TorrentFileInfo(
       index: 0,
       name: 'video.mp4',
       size: 64,
-      downloadedBytes: 64,
+      downloadedBytes: downloadedBytes,
       isVideo: true,
     ),
     if (batch)

@@ -2,6 +2,9 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:kazumi/services/logging/logger.dart';
+import 'package:kazumi/services/player/desktop_pip_geometry.dart';
+import 'package:kazumi/services/storage/storage.dart';
+import 'package:screen_retriever/screen_retriever.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:kazumi/utils/device.dart';
 
@@ -111,26 +114,93 @@ class PipUtils {
     }
   }
 
-  // 进入桌面设备小窗模式，并用播放源比例固定窗口宽高比
-  static Future<void> enterDesktopPIPWindow(
-      {int width = 16, int height = 9}) async {
-    final Size aspectSize = getPIPAspectSize(width: width, height: height);
-    final double aspectRatio = aspectSize.width / aspectSize.height;
-    const double pipWidth = 480;
-    await windowManager.setAlwaysOnTop(true);
-    await windowManager.setAspectRatio(aspectRatio);
-    await windowManager.setSize(Size(pipWidth, pipWidth / aspectRatio));
+  // The window before desktop PiP, restored on exit.
+  static ({Rect bounds, bool maximized, bool alwaysOnTop})? _desktopRestore;
+  static Future<void> _desktopPipTask = Future.value();
+
+  // Window calls interleave across awaits, so run one transition at a time.
+  static Future<void> _runDesktopPipTask(Future<void> Function() task) {
+    final next = _desktopPipTask.catchError((_) {}).then((_) => task());
+    _desktopPipTask = next;
+    return next;
   }
 
-  // 退出桌面设备小窗模式
-  static Future<void> exitDesktopPIPWindow() async {
-    final lowResolution = await isLowResolution();
-    await windowManager.setAlwaysOnTop(false);
-    await windowManager.setAspectRatio(0);
-    await windowManager
-        .setSize(lowResolution ? const Size(800, 600) : const Size(1280, 860));
-    await windowManager.center();
+  static Future<List<Rect>> _desktopWorkAreas() async {
+    try {
+      return [
+        for (final display in await screenRetriever.getAllDisplays())
+          (display.visiblePosition ?? Offset.zero) &
+              (display.visibleSize ?? display.size),
+      ];
+    } catch (e) {
+      KazumiLogger().w('PipUtils: failed to read displays', error: e);
+      return const [];
+    }
   }
+
+  // 进入桌面设备小窗模式，并用播放源比例固定窗口宽高比
+  static Future<void> enterDesktopPIPWindow(
+          {int width = 16, int height = 9}) =>
+      _runDesktopPipTask(() async {
+        final Size aspectSize = getPIPAspectSize(width: width, height: height);
+        final double aspectRatio = aspectSize.width / aspectSize.height;
+        final workAreas = await _desktopWorkAreas();
+        final Rect target;
+        if (_desktopRestore == null) {
+          final maximized = await windowManager.isMaximized();
+          if (maximized) {
+            await windowManager.unmaximize();
+            // Windows applies the restore asynchronously.
+            for (var i = 0; i < 20 && await windowManager.isMaximized(); i++) {
+              await Future<void>.delayed(const Duration(milliseconds: 25));
+            }
+          }
+          final bounds = await windowManager.getBounds();
+          _desktopRestore = (
+            bounds: bounds,
+            maximized: maximized,
+            alwaysOnTop: await windowManager.isAlwaysOnTop(),
+          );
+          target = DesktopPipGeometry.initial(
+            aspectRatio: aspectRatio,
+            window: bounds,
+            workAreas: workAreas,
+            saved: GStorage.getSetting(SettingsKeys.desktopPipWindow),
+          );
+        } else {
+          // A new video size only changes the height of the open PiP window.
+          final current = await windowManager.getBounds();
+          final resized = Rect.fromLTWH(current.left, current.top,
+              current.width, current.width / aspectRatio);
+          final area = DesktopPipGeometry.workAreaFor(resized.center, workAreas);
+          target =
+              area == null ? resized : DesktopPipGeometry.fit(resized, area);
+        }
+        await windowManager.setAlwaysOnTop(true);
+        await windowManager.setAspectRatio(aspectRatio);
+        await windowManager.setBounds(target);
+      });
+
+  // 退出桌面设备小窗模式
+  static Future<void> exitDesktopPIPWindow() => _runDesktopPipTask(() async {
+        final restore = _desktopRestore;
+        _desktopRestore = null;
+        await windowManager.setAspectRatio(0);
+        if (restore == null) {
+          final lowResolution = await isLowResolution();
+          await windowManager.setAlwaysOnTop(false);
+          await windowManager.setSize(
+              lowResolution ? const Size(800, 600) : const Size(1280, 860));
+          await windowManager.center();
+          return;
+        }
+        final pip = await windowManager.getBounds();
+        await GStorage.putSetting<List<dynamic>>(
+            SettingsKeys.desktopPipWindow, [pip.left, pip.top, pip.width]);
+        await windowManager.setAlwaysOnTop(restore.alwaysOnTop);
+        await windowManager.setBounds(restore.bounds);
+        if (restore.maximized) await windowManager.maximize();
+      });
 
   static void initPipHandler({
     required Future<void> Function(String action) onAction,

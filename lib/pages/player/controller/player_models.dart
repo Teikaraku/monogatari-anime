@@ -16,6 +16,7 @@ class PlaybackInitParams {
   final int? sortNumber;
   final Map<String, String> httpHeaders;
   final bool adBlockerEnabled;
+  final bool publicNetworkOnly;
   final String episodeTitle;
   final String referer;
   final int currentRoad;
@@ -33,6 +34,7 @@ class PlaybackInitParams {
     required this.danmakuEpisodeNumber,
     required this.httpHeaders,
     required this.adBlockerEnabled,
+    this.publicNetworkOnly = false,
     required this.episodeTitle,
     required this.referer,
     required this.currentRoad,

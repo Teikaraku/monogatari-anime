@@ -67,6 +67,12 @@ class SettingsKeys {
     true,
     group: SettingGroup.player,
   );
+  // KB/s sent to other BT peers; 0 uploads nothing, -1 is unlimited.
+  static const rssUploadLimit = SettingKey<int>(
+    'rssUploadLimit',
+    64,
+    group: SettingGroup.player,
+  );
 
   static const hAenable = SettingKey<bool>(
     _SettingBoxKey.hAenable,
@@ -329,6 +335,16 @@ class SettingsKeys {
     'webDavEnableDanmakuShield',
     false,
     group: SettingGroup.webdav,
+  );
+  static const webDavEnableRss = SettingKey<bool>(
+    'webDavEnableRss',
+    false,
+    group: SettingGroup.webdav,
+  );
+  static const rssSyncDeviceId = SettingKey<String>(
+    'rssSyncDeviceId',
+    '',
+    group: SettingGroup.sync,
   );
   static const danmakuShieldSyncDeviceId = SettingKey<String>(
     'danmakuShieldSyncDeviceId',
@@ -595,6 +611,12 @@ class SettingsKeys {
     false,
     group: SettingGroup.player,
   );
+  // Desktop PiP window as [left, top, width] in logical pixels.
+  static const desktopPipWindow = SettingKey<List<dynamic>>(
+    'desktopPipWindow',
+    <dynamic>[],
+    group: SettingGroup.misc,
+  );
 
   static final List<SettingKey<Object?>> all = [
     playbackSource,
@@ -602,6 +624,7 @@ class SettingsKeys {
     rssDownloadWhilePlaying,
     rssFallbackToApi,
     rssWifiOnly,
+    rssUploadLimit,
     hAenable,
     hardwareDecoder,
     searchEnhanceEnable,
@@ -654,6 +677,8 @@ class SettingsKeys {
     webDavEnableHistory,
     webDavEnableCollect,
     webDavEnableDanmakuShield,
+    webDavEnableRss,
+    rssSyncDeviceId,
     danmakuShieldSyncDeviceId,
     danmakuShieldSyncState,
     danmakuShieldSyncCorruptState,
@@ -706,6 +731,7 @@ class SettingsKeys {
     playerControllerLayerDisappearTime,
     defaultVolume,
     playerMuted,
+    desktopPipWindow,
   ];
 
   static List<SettingKey<Object?>> byGroup(SettingGroup group) {

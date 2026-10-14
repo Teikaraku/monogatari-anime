@@ -25,6 +25,7 @@ class PlaybackHistoryIdentity {
     required this.entryKind,
     this.onlineBangumiSrc = '',
     this.episodePageUrl = '',
+    this.legacyEpisodePageUrls = const [],
   });
 
   final BangumiItem bangumiItem;
@@ -35,6 +36,7 @@ class PlaybackHistoryIdentity {
   final String entryKind;
   final String onlineBangumiSrc;
   final String episodePageUrl;
+  final List<String> legacyEpisodePageUrls;
 
   bool get canRecord => pluginName.isNotEmpty && episodeNumber > 0;
 
@@ -46,6 +48,7 @@ class PlaybackHistoryIdentity {
     required int road,
     required String onlineBangumiSrc,
     required String episodePageUrl,
+    List<String> legacyEpisodePageUrls = const [],
   }) {
     return PlaybackHistoryIdentity(
       bangumiItem: bangumiItem,
@@ -56,6 +59,7 @@ class PlaybackHistoryIdentity {
       entryKind: HistoryEntryKind.online,
       onlineBangumiSrc: onlineBangumiSrc,
       episodePageUrl: episodePageUrl,
+      legacyEpisodePageUrls: legacyEpisodePageUrls,
     );
   }
 
@@ -112,7 +116,10 @@ class History {
 
   /// 第 N 话 of the latest playback; [lastWatchEpisode] is a list position.
   int get watchedEpisodeNumber =>
-      episodeNumberFromPageUrl(episodePageUrl) ?? lastWatchEpisode;
+      episodeNumberFromPageUrl(episodePageUrl) ??
+      (episodePageUrl.startsWith('monogatari://episode/')
+          ? 0
+          : lastWatchEpisode);
 
   History(
     this.bangumiItem,
@@ -175,7 +182,9 @@ class Progress {
   });
 
   /// 第 N 话 of this record; [episode] is a list position.
-  int get episodeNumber => episodeNumberFromPageUrl(episodePageUrl) ?? episode;
+  int get episodeNumber =>
+      episodeNumberFromPageUrl(episodePageUrl) ??
+      (episodePageUrl.startsWith('monogatari://episode/') ? 0 : episode);
 
   int effectiveUpdatedAtMs(DateTime fallback) {
     return updatedAtMs > 0 ? updatedAtMs : fallback.millisecondsSinceEpoch;

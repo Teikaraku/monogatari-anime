@@ -614,6 +614,202 @@ void main() {
     },
   );
 
+  test('a routine refresh reads the show page only once a day', () async {
+    var now = DateTime(2026, 10, 13, 12);
+    final requests = <Uri>[];
+    final service = RssSubscriptionService(
+      client: MikanRssClient(
+        transport: (uri, _) async {
+          requests.add(uri);
+          return uri.path.startsWith('/RSS') ? _feedXml() : _showHtml();
+        },
+        clock: () => now,
+      ),
+      repository: MemoryRssSubscriptionRepository(),
+      clock: () => now,
+    );
+    final show = await service.getShow(3141);
+    final subscription = await service.subscribe(
+      _subject(),
+      show,
+      show.groups.first,
+    );
+    // Past the client's five-minute page cache, within the daily check.
+    now = now.add(const Duration(minutes: 10));
+    requests.clear();
+    await service.refresh(subscriptionId: subscription.id);
+    expect(requests.map((uri) => uri.path), ['/RSS/Bangumi']);
+    now = now.add(const Duration(hours: 25));
+    requests.clear();
+    await service.refresh(subscriptionId: subscription.id);
+    expect(requests.map((uri) => uri.path), [
+      '/Home/Bangumi/3141',
+      '/RSS/Bangumi',
+    ]);
+    service.dispose();
+  });
+
+  test('a changed show mapping asks for a new subscription', () async {
+    var now = DateTime(2026, 10, 13, 12);
+    var bangumiId = 400602;
+    final service = RssSubscriptionService(
+      client: MikanRssClient(
+        transport: (uri, _) async => uri.path.startsWith('/RSS')
+            ? _feedXml()
+            : _showHtml(bangumiId: bangumiId),
+        clock: () => now,
+      ),
+      repository: MemoryRssSubscriptionRepository(),
+      clock: () => now,
+    );
+    final show = await service.getShow(3141);
+    final subscription = await service.subscribe(
+      _subject(),
+      show,
+      show.groups.first,
+    );
+    bangumiId = 1;
+    now = now.add(const Duration(hours: 25));
+    await service.refresh(subscriptionId: subscription.id);
+    expect(service.subscriptions.single.lastError, contains('重新订阅'));
+    expect(service.lastError, isNull);
+    service.dispose();
+  });
+
+  test('resuming a paused group keeps the group picked for playback', () async {
+    final service = RssSubscriptionService(
+      client: _client(),
+      repository: MemoryRssSubscriptionRepository(),
+    );
+    final show = await service.getShow(3141);
+    final first = await service.subscribe(_subject(), show, show.groups.first);
+    final second = await service.subscribe(_subject(), show, show.groups.last);
+    await service.setEnabled(first.id, false);
+    await service.setEnabled(first.id, true);
+    expect(service.subscriptionForSubject(400602)?.id, second.id);
+    // With nothing usable picked, resuming a group picks it.
+    await service.setEnabled(second.id, false);
+    await service.setEnabled(first.id, false);
+    await service.setEnabled(first.id, true);
+    expect(service.subscriptionForSubject(400602)?.id, first.id);
+    service.dispose();
+  });
+
+  test('releases count as new until the show is opened', () async {
+    var now = DateTime.utc(2026, 10, 13);
+    final repository = MemoryRssSubscriptionRepository();
+    final service = RssSubscriptionService(
+      client: _client(),
+      repository: repository,
+      clock: () => now,
+    );
+    final show = await service.getShow(3141);
+    await service.subscribe(_subject(), show, show.groups.first);
+    expect(service.newReleaseCount(400602), 1);
+    now = DateTime.utc(2026, 10, 14);
+    await service.markViewed(400602);
+    expect(service.newReleaseCount(400602), 0);
+    final restored = RssSubscriptionService(
+      client: _client(),
+      repository: repository,
+    );
+    await restored.initialize();
+    expect(restored.newSince(400602), DateTime.utc(2026, 10, 14));
+    expect(restored.newReleaseCount(400602), 0);
+    service.dispose();
+    restored.dispose();
+  });
+
+  test('a show without a Mikan match is not searched again soon', () async {
+    final requests = <Uri>[];
+    final client = MikanRssClient(
+      transport: (uri, _) async {
+        requests.add(uri);
+        return '<html></html>';
+      },
+    );
+    expect(await client.resolveSubject(_subject()), isNull);
+    final searched = requests.length;
+    expect(searched, greaterThan(0));
+    expect(await client.resolveSubject(_subject()), isNull);
+    expect(requests, hasLength(searched));
+    client.dispose();
+  });
+
+  group('RSS sync', () {
+    final deviceA = 'a' * 32, deviceB = 'b' * 32;
+    var now = DateTime.utc(2026, 10, 13, 12);
+    RssSubscriptionService device() => RssSubscriptionService(
+      client: _client(),
+      repository: MemoryRssSubscriptionRepository(),
+      clock: () => now,
+    );
+
+    test('a subscription and its removal reach the other device', () async {
+      final a = device(), b = device();
+      final show = await a.getShow(3141);
+      final subscription = await a.subscribe(
+        _subject(),
+        show,
+        show.groups.first,
+      );
+      final published = RssSyncState.decode(a.exportSync(deviceA).encode());
+      await b.mergeSyncState(published, deviceB);
+      expect(b.subscriptions.single.id, subscription.id);
+      expect(b.subscriptionForSubject(400602)?.id, subscription.id);
+
+      now = now.add(const Duration(minutes: 5));
+      await b.remove(subscription.id);
+      final removal = b.exportSync(deviceB);
+      await a.mergeSyncState(removal, deviceA);
+      expect(a.subscriptions, isEmpty);
+      // The stale copy published earlier cannot bring it back.
+      await b.mergeSyncState(published, deviceB);
+      expect(b.subscriptions, isEmpty);
+      a.dispose();
+      b.dispose();
+    });
+
+    test('the later playback pick wins on both devices', () async {
+      final a = device(), b = device();
+      final show = await a.getShow(3141);
+      final first = await a.subscribe(_subject(), show, show.groups.first);
+      final second = await a.subscribe(_subject(), show, show.groups.last);
+      await b.mergeSyncState(a.exportSync(deviceA), deviceB);
+      now = now.add(const Duration(minutes: 1));
+      await a.selectSubscription(first.id);
+      now = now.add(const Duration(minutes: 1));
+      await b.selectSubscription(second.id);
+      final merged = await a.mergeSyncState(b.exportSync(deviceB), deviceA);
+      await b.mergeSyncState(merged, deviceB);
+      expect(a.subscriptionForSubject(400602)?.id, second.id);
+      expect(b.subscriptionForSubject(400602)?.id, second.id);
+      a.dispose();
+      b.dispose();
+    });
+
+    test('local edits are announced for sync, refreshes are not', () async {
+      final a = device();
+      final edits = <void>[];
+      final listening = a.localEdits.listen(edits.add);
+      final show = await a.getShow(3141);
+      final subscription = await a.subscribe(
+        _subject(),
+        show,
+        show.groups.first,
+      );
+      await a.refresh(subscriptionId: subscription.id);
+      await a.markViewed(400602);
+      await Future<void>.delayed(Duration.zero);
+      expect(edits, hasLength(1));
+      await a.setEnabled(subscription.id, false);
+      await Future<void>.delayed(Duration.zero);
+      expect(edits, hasLength(2));
+      await listening.cancel();
+      a.dispose();
+    });
+  });
+
   test(
     'repository roundtrip is JSON maps and ignores only malformed records',
     () async {

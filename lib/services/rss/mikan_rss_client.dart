@@ -86,6 +86,9 @@ class MikanRssClient {
   final Duration requestTimeout;
   final Map<int, ({MikanShow show, DateTime expires})> _shows = {};
 
+  /// Shows that matched no Mikan entry, until when to skip looking again.
+  final Map<int, DateTime> _unmatched = {};
+
   Future<List<MikanShow>> searchShows(
     String keyword, {
     CancelToken? cancelToken,
@@ -152,10 +155,16 @@ class MikanRssClient {
         return cached.show;
       }
     }
+    final miss = _unmatched[bangumiId];
+    if (miss != null && _clock().isBefore(miss)) return null;
     final inspected = <int>{};
     for (final name in names) {
       _checkCancelled(cancelToken);
-      final candidates = await searchShows(name, cancelToken: cancelToken);
+      // Each candidate costs a page request; the right one ranks near the top.
+      final candidates = (await searchShows(
+        name,
+        cancelToken: cancelToken,
+      )).take(12).toList();
       // Verify identities from official Bangumi links, never title similarity.
       for (var start = 0; start < candidates.length; start += 3) {
         final chunk = candidates
@@ -178,18 +187,23 @@ class MikanRssClient {
         }
       }
     }
+    _unmatched.removeWhere((_, until) => !_clock().isBefore(until));
+    _unmatched[bangumiId] = _clock().add(const Duration(minutes: 30));
     return null;
   }
 
+  /// [resolveShow] also reads the show page to report its Bangumi id; a
+  /// routine refresh of a verified subscription skips it.
   Future<RssFeedPreview> previewFeed(
     Uri uri, {
     CancelToken? cancelToken,
+    bool resolveShow = true,
   }) async {
     if (!isMikanFeedUri(uri)) throw const RssException('仅支持蜜柑官网的 HTTPS RSS 地址');
     final mikanId = uri.path.toLowerCase() == '/rss/bangumi'
         ? mikanFeedId(uri, 'bangumiId')
         : null;
-    final show = mikanId == null
+    final show = mikanId == null || !resolveShow
         ? null
         : await getShow(mikanId, cancelToken: cancelToken);
     final source = await _request(uri, cancelToken);

@@ -28,3 +28,4 @@ The application uses its own loopback HTTP Range server, cancellation and task
 persistence. It does not use the upstream single-reader streaming interface.
 The application explicitly flushes payload data on pause/stop and computes
 selected-file progress rather than using upstream's single-file progress getter.
+- Enforce an upload rate limit (`TorrentTask.setUploadRateLimit`): a token bucket drops peer requests beyond the cap, and a zero cap keeps peers choked. Upstream only stored scheduler upload caps without applying them.

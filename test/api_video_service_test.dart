@@ -123,7 +123,7 @@ void main() {
       final item = subject();
       final catalog = await service.loadCatalog(item);
       expect(catalog.episodes.map((v) => v.number), [1, 2, 3, null]);
-      expect(catalog.episodes.last.key, 'special:sp01');
+      expect(catalog.episodes.last.key, 'special:sp:1');
       final iterator = StreamIterator(
         service.candidatesForEpisode(item, catalog.episodes.first),
       );

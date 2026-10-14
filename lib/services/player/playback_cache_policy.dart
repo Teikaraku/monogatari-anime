@@ -15,8 +15,10 @@ class PlaybackCachePolicy {
        _isTorrentStream = isTorrentStream ?? (() => false),
        _currentPlayer = currentPlayer;
 
-  static const int _lowMemoryBufferSize = 2 * 1024 * 1024;
-  static const int _defaultBufferSize = 1500 * 1024 * 1024;
+  // Two MiB holds only a few seconds of typical HD video. A bounded forward
+  // buffer absorbs segment latency without a 1.5 GiB memory reservation.
+  static const int _lowMemoryBufferSize = 32 * 1024 * 1024;
+  static const int _defaultBufferSize = 128 * 1024 * 1024;
 
   final bool Function() _isLocalPlayback;
   final bool Function() _isTorrentStream;
@@ -69,7 +71,16 @@ class PlaybackCachePolicy {
         }
         final size = bufferSize.toString();
         await pp.setProperty('demuxer-max-bytes', size);
-        await pp.setProperty('demuxer-max-back-bytes', size);
+        await pp.setProperty(
+          'demuxer-max-back-bytes',
+          (bufferSize ~/ 4).toString(),
+        );
+        if (!_isLocalPlayback()) {
+          await pp.setProperty('cache-on-disk', 'no');
+          await pp.setProperty('cache-secs', _isTorrentStream() ? '30' : '60');
+          await pp.setProperty('cache-pause-wait', '3');
+          await pp.setProperty('cache-pause-initial', 'yes');
+        }
       });
     } catch (e) {
       KazumiLogger().w(

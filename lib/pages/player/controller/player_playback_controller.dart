@@ -11,7 +11,10 @@ import 'package:kazumi/services/shaders/shader_asset_service.dart';
 import 'package:kazumi/utils/constants.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/request/core/network_config.dart';
+import 'package:kazumi/services/api_video/public_video_proxy.dart';
+import 'package:kazumi/services/api_video/public_hls_proxy.dart';
 import 'package:kazumi/services/player/playback_cache_policy.dart';
+import 'package:kazumi/services/player/media_trust_store.dart';
 import 'package:kazumi/services/player/player_error_mapper.dart';
 import 'package:kazumi/services/storage/storage.dart';
 import 'package:kazumi/services/video_source/video_source_format.dart';
@@ -29,9 +32,11 @@ class PlayerPlaybackController = _PlayerPlaybackController
     with _$PlayerPlaybackController;
 
 final class _OwnedPlayer {
-  _OwnedPlayer(this.player);
+  _OwnedPlayer(this.player, [this.publicRoute, this.hlsRoute]);
 
   final Player player;
+  final PublicVideoProxy? publicRoute;
+  final PublicHlsProxy? hlsRoute;
   Future<void>? _disposeFuture;
 
   Future<void> dispose() {
@@ -39,6 +44,8 @@ final class _OwnedPlayer {
   }
 
   Future<void> _dispose() async {
+    await hlsRoute?.close();
+    await publicRoute?.close();
     try {
       await player.dispose();
     } catch (error, stackTrace) {
@@ -278,6 +285,7 @@ abstract class _PlayerPlaybackController with Store {
     int offset = 0,
     VideoSourceFormat videoSourceFormat = VideoSourceFormat.auto,
     bool isTorrentStream = false,
+    bool publicNetworkOnly = false,
   }) async {
     _torrentStream = isTorrentStream;
     startOffset = offset;
@@ -295,7 +303,20 @@ abstract class _PlayerPlaybackController with Store {
     if (!canInstall()) {
       return null;
     }
-    final candidate = _OwnedPlayer(
+    final hlsRoute = publicNetworkOnly && videoSourceFormat == VideoSourceFormat.hls
+        ? PublicHlsProxy(source: Uri.parse(videoUrl()), headers: httpHeaders,
+            adBlockerEnabled: adBlockerEnabled,
+            proxyForUri: (uri) => NetworkConfig.fromSettings().proxyForUri(uri))
+        : null;
+    final route = publicNetworkOnly && hlsRoute == null ? PublicVideoProxy(
+      proxyForUri: (uri) => NetworkConfig.fromSettings().proxyForUri(uri),
+    ) : null;
+    await route?.start();
+    await hlsRoute?.start();
+    if (!canInstall()) { await route?.close(); await hlsRoute?.close(); return null; }
+    late final _OwnedPlayer candidate;
+    try {
+      candidate = _OwnedPlayer(
       Player(
         configuration: PlayerConfiguration(
           bufferSize: cachePolicy.bufferSize,
@@ -303,8 +324,13 @@ abstract class _PlayerPlaybackController with Store {
           logLevel: MPVLogLevel.values[debug.playerLogLevel],
           adBlocker: adBlockerEnabled,
         ),
-      ),
-    );
+      ), route, hlsRoute,
+      );
+    } catch (_) {
+      await route?.close();
+      await hlsRoute?.close();
+      rethrow;
+    }
     final player = candidate.player;
     if (!canInstall()) {
       await candidate.dispose();
@@ -366,7 +392,14 @@ abstract class _PlayerPlaybackController with Store {
       final proxy = isTorrentStream || isLocalPlayback() || mediaUri == null
           ? null
           : NetworkConfig.fromSettings().proxyForUri(mediaUri);
-      await pp.setProperty('http-proxy', proxy?.toString() ?? '');
+      await pp.setProperty('http-proxy', hlsRoute != null ? '' : route?.uri.toString() ?? proxy?.toString() ?? '');
+      if (publicNetworkOnly) {
+        await pp.setProperty('tls-ca-file', await MediaTrustStore.caFile());
+        await pp.setProperty('tls-verify', 'yes');
+        await pp.setProperty('network-timeout', '15');
+        await pp.setProperty('demuxer-lavf-o',
+          'seg_max_retry=2,http_multiple=1,http_persistent=1,strict=experimental,allowed_extensions=ALL,hls_ad_filter=${hlsRoute == null && adBlockerEnabled ? 1 : 0},protocol_whitelist=[${hlsRoute != null ? 'http,tcp,crypto' : 'https,tls,tcp,httpproxy,crypto'}]');
+      }
       if (!isCurrentPlayer(player)) {
         return await _discardIfNotCurrent(candidate);
       }
@@ -424,6 +457,7 @@ abstract class _PlayerPlaybackController with Store {
 
       bool showPlayerError = GStorage.getSetting(SettingsKeys.showPlayerError);
       player.stream.error.listen((event) {
+        if (!isCurrentPlayer(player)) return;
         if (isCurrentPlayer(player)) {
           final handled = onPlaybackError?.call(event) ?? false;
           final actionableMessage = PlayerErrorMapper.toActionableMessage(
@@ -465,7 +499,7 @@ abstract class _PlayerPlaybackController with Store {
 
       await player.open(
         Media(
-          videoUrl(),
+          hlsRoute?.uri.toString() ?? videoUrl(),
           start: Duration(seconds: offset),
           httpHeaders: httpHeaders,
         ),

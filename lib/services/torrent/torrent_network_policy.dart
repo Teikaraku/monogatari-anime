@@ -13,3 +13,9 @@ Future<bool> torrentNetworkAllowed() async {
     return false;
   }
 }
+
+/// The upload cap in bytes per second; null is unlimited.
+int? torrentUploadLimit() {
+  final kilobytes = GStorage.getSetting(SettingsKeys.rssUploadLimit);
+  return kilobytes < 0 ? null : kilobytes * 1024;
+}

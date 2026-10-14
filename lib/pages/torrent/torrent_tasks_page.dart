@@ -3,15 +3,21 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_modular/flutter_modular.dart';
-import 'package:kazumi/bean/appbar/sys_app_bar.dart';
+import 'package:kazumi/bean/settings/settings_detail_scaffold.dart';
+import 'package:kazumi/bean/settings/settings_list.dart';
 import 'package:kazumi/bean/widget/empty_state_widget.dart';
+import 'package:kazumi/bean/widget/kazumi_menu.dart';
+import 'package:kazumi/bean/widget/loading_indicator.dart';
+import 'package:kazumi/bean/widget/split_list_row.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
+import 'package:kazumi/pages/subscriptions/rss_widgets.dart';
 import 'package:kazumi/pages/video/video_playback_args.dart';
 import 'package:kazumi/request/apis/bangumi_api.dart';
 import 'package:kazumi/services/download/background_download_service.dart';
 import 'package:kazumi/services/torrent/torrent_models.dart';
 import 'package:kazumi/services/torrent/torrent_service.dart';
 import 'package:kazumi/utils/format.dart';
+import 'package:kazumi/utils/theme.dart';
 
 class TorrentTasksPage extends StatefulWidget {
   const TorrentTasksPage({super.key, required this.service, this.subjectId});
@@ -28,6 +34,9 @@ class _TorrentTasksPageState extends State<TorrentTasksPage> {
   List<TorrentTaskSnapshot> _tasks = [];
   late TorrentCapability _capability;
   final Set<String> _busy = {};
+
+  /// Tasks whose file list is open, by id so the state follows reordering.
+  final Set<String> _expanded = {};
   String? _error;
   bool _loading = true;
   int _revision = 0;
@@ -133,16 +142,30 @@ class _TorrentTasksPageState extends State<TorrentTasksPage> {
     });
   }
 
+  // Files live in the app's private storage; a kept copy could never be
+  // reached again, so a task is always deleted with its files.
   Future<void> _delete(TorrentTaskSnapshot task) async {
-    final deleteFiles = await showDialog<bool>(
+    final accepted = await showDialog<bool>(
       context: context,
       builder: (context) => _DeleteTaskDialog(title: task.title),
     );
-    if (deleteFiles == null || !mounted) return;
+    if (accepted != true || !mounted) return;
     await _perform(
       task.id,
-      () => widget.service.delete(task.id, deleteFiles: deleteFiles),
+      () => widget.service.delete(task.id, deleteFiles: true),
     );
+  }
+
+  Future<void> _openFolder(TorrentTaskSnapshot task) async {
+    final path = await widget.service.filesPath(task.id);
+    if (path == null) return;
+    if (Platform.isWindows) {
+      await Process.start('explorer.exe', [path]);
+    } else if (Platform.isMacOS) {
+      await Process.start('open', [path]);
+    } else if (Platform.isLinux) {
+      await Process.start('xdg-open', [path]);
+    }
   }
 
   Future<void> _playFile(TorrentTaskSnapshot task, TorrentFileInfo file) async {
@@ -201,47 +224,72 @@ class _TorrentTasksPageState extends State<TorrentTasksPage> {
     final taskIndices = {
       for (var index = 0; index < tasks.length; index++) tasks[index].id: index,
     };
-    return Scaffold(
-      appBar: const SysAppBar(title: Text('磁力任务')),
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 1000),
-          child: Column(
-            children: [
-              if (Platform.isIOS)
-                const _MessageRow(
-                  message: 'iOS 的后台运行受系统限制；磁力下载时请保持应用在前台，切到后台后任务可能中断。',
-                ),
-              if (!_capability.supported || !_capability.ready)
-                _MessageRow(
-                  message: _capability.unavailableReason ?? '磁力引擎暂不可用',
-                ),
-              if (_error != null)
-                _MessageRow(
-                  message: _error!,
-                  onRetry: _loading ? null : () => _initialize(_revision),
-                ),
-              Expanded(
-                child: _loading
-                    ? const Center(child: CircularProgressIndicator())
-                    : tasks.isEmpty
-                    ? const GeneralEmptyState(
-                        icon: Icons.downloading_rounded,
-                        title: '还没有磁力任务',
-                      )
-                    : ListView.builder(
-                        padding: const EdgeInsets.all(16),
-                        itemCount: tasks.length,
-                        itemBuilder: (context, index) =>
-                            _taskCard(tasks[index]),
-                        findChildIndexCallback: (key) => key is ValueKey<String>
-                            ? taskIndices[key.value]
-                            : null,
-                      ),
-              ),
-            ],
-          ),
+    final banners = [
+      if (Platform.isIOS)
+        const RssBanner(
+          message: 'iOS 切到后台后，磁力任务可能中断',
+          tone: RssBannerTone.info,
         ),
+      if (!_capability.supported || !_capability.ready)
+        RssBanner(
+          message: _capability.unavailableReason ?? '磁力引擎暂不可用',
+          tone: RssBannerTone.info,
+        ),
+      if (_error != null)
+        RssBanner(
+          message: _error!,
+          tone: RssBannerTone.error,
+          actionLabel: _loading ? null : '重试',
+          onAction: _loading ? null : () => _initialize(_revision),
+        ),
+    ];
+    Widget readable(Widget child) => Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: settingsReadableWidth),
+        child: child,
+      ),
+    );
+    return SettingsDetailScaffold(
+      title: const Text('磁力任务'),
+      body: MonoGroupedScope(
+        grouped: true,
+        child: _loading
+            ? const Center(child: LoadingIndicator())
+            : tasks.isEmpty
+            ? Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                child: Column(
+                  children: [
+                    for (final banner in banners) readable(banner),
+                    const Expanded(
+                      child: GeneralEmptyState(
+                        icon: Icons.hub_rounded,
+                        title: '还没有磁力任务',
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            : ListView.builder(
+                padding: EdgeInsets.fromLTRB(
+                  16,
+                  4,
+                  16,
+                  32 + MediaQuery.paddingOf(context).bottom,
+                ),
+                itemCount: banners.length + tasks.length,
+                itemBuilder: (context, index) => readable(
+                  index < banners.length
+                      ? banners[index]
+                      : _taskCard(tasks[index - banners.length]),
+                ),
+                findChildIndexCallback: (key) => key is ValueKey<String>
+                    ? switch (taskIndices[key.value]) {
+                        final index? => index + banners.length,
+                        null => null,
+                      }
+                    : null,
+              ),
       ),
     );
   }
@@ -252,6 +300,7 @@ class _TorrentTasksPageState extends State<TorrentTasksPage> {
       TorrentTaskState.metadata,
       TorrentTaskState.downloading,
       TorrentTaskState.buffering,
+      TorrentTaskState.queued,
     }.contains(task.state);
     final resumable = const {
       TorrentTaskState.paused,
@@ -261,206 +310,409 @@ class _TorrentTasksPageState extends State<TorrentTasksPage> {
     final progress = task.progress.isFinite
         ? task.progress.clamp(0.0, 1.0).toDouble()
         : 0.0;
-    return Card(
+    final colors = Theme.of(context).colorScheme;
+    final palette = MonoPalette.of(context);
+    final videos = task.files.where((file) => file.isVideo).toList();
+    final bound = task.bangumiId != null;
+    final expanded = _expanded.contains(task.id);
+    final tone = switch (task.state) {
+      TorrentTaskState.completed => palette.success,
+      TorrentTaskState.error => colors.error,
+      TorrentTaskState.paused || TorrentTaskState.queued ||
+      TorrentTaskState.cancelled => palette.secondaryLabel,
+      _ => colors.primary,
+    };
+
+    final Widget? primary = busy
+        ? const SizedBox(
+            width: 48,
+            height: 48,
+            child: Center(
+              child: SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          )
+        : active
+        ? _RoundAction(
+            tooltip: '暂停',
+            icon: Icons.pause_rounded,
+            onPressed: () =>
+                _perform(task.id, () => widget.service.pause(task.id)),
+          )
+        : resumable
+        ? _RoundAction(
+            tooltip: task.state == TorrentTaskState.error ? '重试' : '继续',
+            icon: task.state == TorrentTaskState.error
+                ? Icons.refresh_rounded
+                : Icons.play_arrow_rounded,
+            onPressed: !_capability.ready
+                ? null
+                : () => _perform(task.id, () async {
+                    await BackgroundDownloadService().resumeForUser();
+                    if (mounted) {
+                      await widget.service.resume(task.id);
+                    }
+                  }),
+          )
+        : task.state == TorrentTaskState.completed &&
+              bound &&
+              videos.length == 1
+        ? _RoundAction(
+            tooltip: '播放',
+            icon: Icons.play_arrow_rounded,
+            onPressed: () => _playFile(task, videos.single),
+          )
+        : null;
+
+    final speed = active && task.state != TorrentTaskState.metadata
+        ? [
+            '↓ ${formatSpeed(task.downloadBytesPerSecond.toDouble())}',
+            if (task.uploadBytesPerSecond > 0)
+              '↑ ${formatSpeed(task.uploadBytesPerSecond.toDouble())}',
+            '${task.peers} 个连接',
+          ].join(' · ')
+        : null;
+
+    return Padding(
       key: ValueKey(task.id),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Material(
+        color: palette.groupedCell,
+        borderRadius: BorderRadius.circular(12),
+        clipBehavior: Clip.antiAlias,
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(task.title, style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Text(_status(task)),
-            const SizedBox(height: 8),
-            LinearProgressIndicator(
-              value: task.totalBytes > 0
-                  ? progress
-                  : active
-                  ? null
-                  : 0,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              [
-                '${formatBytes(task.downloadedBytes)} / ${task.totalBytes > 0 ? formatBytes(task.totalBytes) : '大小待获取'}',
-                if (active) formatSpeed(task.downloadBytesPerSecond.toDouble()),
-                if (active) '${task.peers} 个连接',
-              ].join(' · '),
-            ),
-            if (task.error != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(
-                  task.error!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
-              ),
-            if (task.bangumiId == null &&
-                task.files.any((file) => file.isVideo))
-              const Padding(
-                padding: EdgeInsets.only(top: 8),
-                child: Text('任务未绑定番组，暂时不能在应用内播放'),
-              ),
-            if (task.files.isNotEmpty)
-              ExpansionTile(
-                key: PageStorageKey('torrent-files:${task.id}'),
-                title: Text(
-                  '${task.files.where((file) => file.isVideo).length} 个视频文件',
-                ),
-                tilePadding: EdgeInsets.zero,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 4, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  for (final file in task.files.where((file) => file.isVideo))
-                    ListTile(
-                      dense: true,
-                      title: Text(file.name),
-                      subtitle: Text(
-                        '${formatBytes(file.downloadedBytes)} / ${formatBytes(file.size)}',
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              task.title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 15,
+                                height: 1.35,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              _status(task),
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                                color: tone,
+                              ),
+                            ),
+                            if (task.notice != null &&
+                                (task.state == TorrentTaskState.paused ||
+                                    task.state == TorrentTaskState.queued))
+                              Text(
+                                task.notice!,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: palette.secondaryLabel,
+                                ),
+                              ),
+                          ],
+                        ),
                       ),
-                      trailing: IconButton(
-                        tooltip: '播放该文件',
-                        icon: const Icon(Icons.play_circle_outline),
-                        onPressed: task.bangumiId == null || busy
-                            ? null
-                            : () => _playFile(task, file),
+                      const SizedBox(width: 4),
+                      ?primary,
+                      _taskMenu(task, busy: busy, active: active),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Padding(
+                    padding: const EdgeInsets.only(right: 12),
+                    child: _ProgressBar(
+                      color: tone,
+                      value: task.totalBytes > 0
+                          ? progress
+                          : active
+                          ? null
+                          : 0,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Padding(
+                    padding: const EdgeInsets.only(right: 12),
+                    child: DefaultTextStyle.merge(
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: palette.secondaryLabel,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              task.totalBytes > 0
+                                  ? '${formatBytes(task.downloadedBytes)} / ${formatBytes(task.totalBytes)}'
+                                  : formatBytes(task.downloadedBytes),
+                            ),
+                          ),
+                          if (speed != null) Text(speed),
+                        ],
                       ),
                     ),
+                  ),
+                  if (task.error != null) ...[
+                    const SizedBox(height: 6),
+                    Padding(
+                      padding: const EdgeInsets.only(right: 12),
+                      child: Text(
+                        task.error!,
+                        style: TextStyle(fontSize: 13, color: colors.error),
+                      ),
+                    ),
+                  ],
+                  if (!bound && videos.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      '未关联番剧，无法在应用内播放',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: palette.secondaryLabel,
+                      ),
+                    ),
+                  ],
                 ],
               ),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                if (task.bangumiId != null)
-                  TextButton.icon(
-                    onPressed: busy ? null : () => _openSubject(task),
-                    icon: const Icon(Icons.movie_outlined),
-                    label: const Text('对应番组'),
-                  ),
-                if (active)
-                  OutlinedButton.icon(
-                    onPressed: busy
-                        ? null
-                        : () => _perform(
-                            task.id,
-                            () => widget.service.pause(task.id),
-                          ),
-                    icon: const Icon(Icons.pause),
-                    label: const Text('暂停'),
-                  ),
-                if (resumable)
-                  FilledButton.icon(
-                    onPressed: busy || !_capability.ready
-                        ? null
-                        : () => _perform(task.id, () async {
-                            await BackgroundDownloadService().resumeForUser();
-                            if (mounted) await widget.service.resume(task.id);
-                          }),
-                    icon: const Icon(Icons.play_arrow),
-                    label: Text(
-                      task.state == TorrentTaskState.error ? '重试' : '继续',
-                    ),
-                  ),
-                if (active || task.state == TorrentTaskState.paused)
-                  TextButton(
-                    onPressed: busy
-                        ? null
-                        : () => _perform(
-                            task.id,
-                            () => widget.service.cancel(task.id),
-                          ),
-                    child: const Text('取消任务'),
-                  ),
-                TextButton.icon(
-                  onPressed: busy ? null : () => _delete(task),
-                  icon: const Icon(Icons.delete_outline),
-                  label: const Text('删除'),
-                ),
-                if (busy)
-                  const Padding(
-                    padding: EdgeInsets.all(12),
-                    child: SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  ),
-              ],
             ),
+            if (videos.isNotEmpty) ...[
+              Divider(height: 0.5, thickness: 0.5, color: palette.hairline),
+              InkWell(
+                onTap: () => setState(() {
+                  if (!_expanded.remove(task.id)) _expanded.add(task.id);
+                }),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.movie_outlined,
+                        size: 18,
+                        color: palette.secondaryLabel,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '${videos.length} 个视频文件',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: palette.secondaryLabel,
+                          ),
+                        ),
+                      ),
+                      AnimatedRotation(
+                        turns: expanded ? 0.25 : 0,
+                        duration: const Duration(milliseconds: 200),
+                        child: Icon(
+                          Icons.chevron_right_rounded,
+                          color: palette.tertiaryLabel,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              AnimatedSize(
+                duration: const Duration(milliseconds: 200),
+                curve: Curves.easeInOutCubic,
+                alignment: Alignment.topCenter,
+                child: !expanded
+                    ? const SizedBox(width: double.infinity)
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          for (final file in videos) ...[
+                            Divider(
+                              height: 0.5,
+                              thickness: 0.5,
+                              indent: 16,
+                              color: palette.hairline,
+                            ),
+                            RssRow(
+                              title: file.name,
+                              titleMaxLines: 3,
+                              subtitle:
+                                  '${formatBytes(file.downloadedBytes)} / ${formatBytes(file.size)}',
+                              trailing: IconButton(
+                                tooltip: '播放该文件',
+                                color: colors.primary,
+                                icon: const Icon(
+                                  Icons.play_circle_outline_rounded,
+                                ),
+                                onPressed: !bound || busy
+                                    ? null
+                                    : () => _playFile(task, file),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+              ),
+            ],
           ],
         ),
       ),
     );
   }
 
+  Widget _taskMenu(
+    TorrentTaskSnapshot task, {
+    required bool busy,
+    required bool active,
+  }) {
+    return KazumiMenuButton(
+      enabled: !busy,
+      menuChildren: [
+        if (task.bangumiId != null)
+          KazumiMenuItem(
+            label: '对应番组',
+            leadingIcon: const Icon(Icons.movie_outlined),
+            onPressed: () => _openSubject(task),
+          ),
+        if (_desktop && task.downloadedBytes > 0)
+          KazumiMenuItem(
+            label: '打开文件夹',
+            leadingIcon: const Icon(Icons.folder_open_outlined),
+            onPressed: () => unawaited(_openFolder(task)),
+          ),
+        if (active || task.state == TorrentTaskState.paused ||
+            task.state == TorrentTaskState.queued)
+          KazumiMenuItem(
+            label: '取消任务',
+            leadingIcon: const Icon(Icons.stop_circle_outlined),
+            onPressed: () =>
+                _perform(task.id, () => widget.service.cancel(task.id)),
+          ),
+        KazumiMenuItem(
+          label: '删除',
+          leadingIcon: const Icon(Icons.delete_outline_rounded),
+          destructive: true,
+          onPressed: () => _delete(task),
+        ),
+      ],
+      builder: (context, toggle) =>
+          RssMoreButton(tooltip: '任务选项', onPressed: toggle),
+    );
+  }
+
+  static bool get _desktop =>
+      Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+
   String _status(TorrentTaskSnapshot task) => switch (task.state) {
     TorrentTaskState.metadata => '正在获取文件信息',
     TorrentTaskState.downloading =>
-      '下载中 · ${(task.progress * 100).clamp(0, 100).toStringAsFixed(0)}%',
-    TorrentTaskState.buffering =>
-      task.streamReady ? '正在播放 · 按需缓冲' : '正在缓冲播放所需内容',
+      '下载中 ${(task.progress * 100).clamp(0, 100).toStringAsFixed(0)}%',
+    TorrentTaskState.buffering => task.streamReady ? '正在播放' : '正在缓冲',
     TorrentTaskState.paused => '已暂停',
-    TorrentTaskState.cancelled => '已取消，已下载内容保留',
+    TorrentTaskState.queued => '等待自动继续',
+    TorrentTaskState.cancelled => '已取消',
     TorrentTaskState.completed => '已完成',
-    TorrentTaskState.error => '任务失败',
+    TorrentTaskState.error => '下载失败',
   };
 }
 
-class _MessageRow extends StatelessWidget {
-  const _MessageRow({required this.message, this.onRetry});
-  final String message;
-  final VoidCallback? onRetry;
+/// A plain rounded bar; indeterminate while the size is unknown.
+class _ProgressBar extends StatelessWidget {
+  const _ProgressBar({required this.color, required this.value});
+
+  final Color color;
+  final double? value;
+
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.all(16),
-    child: Row(
-      children: [
-        const Icon(Icons.info_outline),
-        const SizedBox(width: 12),
-        Expanded(child: Text(message)),
-        if (onRetry != null)
-          TextButton(onPressed: onRetry, child: const Text('重试')),
-      ],
-    ),
-  );
+  Widget build(BuildContext context) {
+    final track = MonoPalette.of(context).fill;
+    final radius = BorderRadius.circular(2);
+    if (value == null) {
+      return LinearProgressIndicator(
+        minHeight: 4,
+        color: color,
+        backgroundColor: track,
+        borderRadius: radius,
+      );
+    }
+    return Container(
+      height: 4,
+      decoration: BoxDecoration(color: track, borderRadius: radius),
+      alignment: AlignmentDirectional.centerStart,
+      child: FractionallySizedBox(
+        widthFactor: value!.clamp(0.0, 1.0),
+        child: DecoratedBox(
+          decoration: BoxDecoration(color: color, borderRadius: radius),
+          child: const SizedBox.expand(),
+        ),
+      ),
+    );
+  }
 }
 
-class _DeleteTaskDialog extends StatefulWidget {
+/// The task's main control: a tinted round button.
+class _RoundAction extends StatelessWidget {
+  const _RoundAction({
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return IconButton.filled(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      style: IconButton.styleFrom(
+        backgroundColor: colors.primary.withValues(alpha: 0.12),
+        foregroundColor: colors.primary,
+      ),
+      icon: Icon(icon),
+    );
+  }
+}
+
+class _DeleteTaskDialog extends StatelessWidget {
   const _DeleteTaskDialog({required this.title});
   final String title;
-  @override
-  State<_DeleteTaskDialog> createState() => _DeleteTaskDialogState();
-}
 
-class _DeleteTaskDialogState extends State<_DeleteTaskDialog> {
-  bool _deleteFiles = false;
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('删除磁力任务'),
-    content: SizedBox(
-      width: 480,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(widget.title),
-          const SizedBox(height: 12),
-          CheckboxListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('同时删除已下载文件'),
-            value: _deleteFiles,
-            onChanged: (value) => setState(() => _deleteFiles = value ?? false),
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return AlertDialog(
+      title: const Text('删除磁力任务'),
+      content: SizedBox(width: 480, child: Text('「$title」和已下载的文件会一起删除。')),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: colors.error,
+            foregroundColor: colors.onError,
           ),
-        ],
-      ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('取消'),
-      ),
-      FilledButton(
-        onPressed: () => Navigator.pop(context, _deleteFiles),
-        child: const Text('删除任务'),
-      ),
-    ],
-  );
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('删除任务'),
+        ),
+      ],
+    );
+  }
 }

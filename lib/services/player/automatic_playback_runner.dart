@@ -10,6 +10,7 @@ class AutomaticPlaybackRunner<T> {
     required this.onReady,
     required this.onExhausted,
     required this.currentOffset,
+    this.onFailure,
   });
 
   final Future<bool> Function(T candidate, int offset) open;
@@ -18,6 +19,7 @@ class AutomaticPlaybackRunner<T> {
   final void Function(T candidate) onReady;
   final void Function() onExhausted;
   final int Function() currentOffset;
+  final void Function(Object error)? onFailure;
 
   StreamIterator<T>? _candidates;
   int _generation = 0;
@@ -56,7 +58,8 @@ class AutomaticPlaybackRunner<T> {
         bool playable;
         try {
           playable = await open(candidate, offset);
-        } catch (_) {
+        } catch (error) {
+          onFailure?.call(error);
           playable = false;
         }
         if (generation != _generation) return false;
@@ -70,8 +73,9 @@ class AutomaticPlaybackRunner<T> {
         onExhausted();
       }
       return false;
-    } catch (_) {
+    } catch (error) {
       if (generation == _generation) {
+        onFailure?.call(error);
         _candidates = null;
         onExhausted();
       }
@@ -105,6 +109,10 @@ class AutomaticPlaybackRunner<T> {
       'connection refused',
       'connection timed out',
       'connection reset',
+      'ffurl_read returned',
+      'network is unreachable',
+      'failed host lookup',
+      'tls handshake',
       'no playable streams',
       'no video or audio streams',
       'moov atom not found',

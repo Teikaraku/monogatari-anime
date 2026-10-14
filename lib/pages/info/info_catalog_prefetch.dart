@@ -9,9 +9,9 @@ typedef InfoCatalogWarmup =
 /// Owns only the detail route's metadata warmup subscription. Playback has its
 /// own cancellation owner even when both subscriptions share a service flight.
 class InfoCatalogPrefetch {
-  InfoCatalogPrefetch(this._warmup);
+  InfoCatalogPrefetch([this._warmup]);
 
-  final InfoCatalogWarmup _warmup;
+  final InfoCatalogWarmup? _warmup;
   int _revision = 0;
   int? _subjectId;
   bool _disposed = false;
@@ -28,7 +28,7 @@ class InfoCatalogPrefetch {
       !_disposed && _revision == revision && _subjectId == subjectId;
 
   void afterDetailsApplied(int revision, BangumiItem subject) {
-    if (!isCurrent(revision, subject.id)) return;
+    if (!isCurrent(revision, subject.id) || _warmup == null) return;
     _cancellation?.cancel();
     final cancellation = CancelToken();
     _cancellation = cancellation;

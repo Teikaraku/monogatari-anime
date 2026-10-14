@@ -828,8 +828,7 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
                   onCapture: widget.handleScreenShot,
                   onReview: widget.showScreenshotCandidates,
                 ),
-              if ((_desktop &&
-                      (compact || !videoPageController.isFullscreen)) ||
+              if (_desktop ||
                   (defaultTargetPlatform == TargetPlatform.android))
                 IconButton(
                   onPressed: () async {
@@ -837,6 +836,10 @@ class _PlayerItemPanelState extends State<PlayerItemPanel> {
                       if (videoPageController.isPip) {
                         await PipUtils.exitDesktopPIPWindow();
                       } else {
+                        if (videoPageController.isFullscreen) {
+                          await videoPageController.fullscreen
+                              .setFullscreen(false);
+                        }
                         await PipUtils.enterDesktopPIPWindow(
                           width: playerController.debug.playerWidth,
                           height: playerController.debug.playerHeight,

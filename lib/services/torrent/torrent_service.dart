@@ -24,6 +24,7 @@ class TorrentService {
   final _tasksController =
       StreamController<List<TorrentTaskSnapshot>>.broadcast();
   final _capabilityController = StreamController<TorrentCapability>.broadcast();
+  final _noticeController = StreamController<String>.broadcast();
   final _metadataTokens = <CancelToken>{};
   final _metadataWriters = <String, int>{};
   Directory? _directory;
@@ -33,6 +34,9 @@ class TorrentService {
   Future<void> _saveLane = Future.value();
   Future<void> _activationLane = Future.value();
   bool _refreshing = false;
+  bool _drainingDownloads = false;
+  Future<void>? _drainWork;
+  Future<void>? _refreshWork;
   bool _closed = false;
   var _lastPolicyCheck = DateTime.fromMillisecondsSinceEpoch(0);
   TorrentCapability _capability = const TorrentCapability(
@@ -48,7 +52,9 @@ class TorrentService {
     this.maxActiveTasks = 2,
   }) : _engine = engine ?? DartTorrentEngine(),
        _directoryProvider = directoryProvider ?? _defaultDirectory,
-       _networkAllowed = networkAllowed ?? (() async => true);
+       _networkAllowed = networkAllowed ?? (() async => true) {
+    if (maxActiveTasks < 1) throw ArgumentError.value(maxActiveTasks);
+  }
 
   static Future<Directory> _defaultDirectory() async {
     final support = await getApplicationSupportDirectory();
@@ -64,6 +70,10 @@ class TorrentService {
   List<TorrentTaskSnapshot> get tasks =>
       List.unmodifiable(_records.values.map((r) => r.snapshot));
   Stream<List<TorrentTaskSnapshot>> get watchTasks => _tasksController.stream;
+
+  /// Things the service did on its own that the user should hear about, such
+  /// as pausing a download.
+  Stream<String> get notices => _noticeController.stream;
   int get inactiveCacheBytes => _records.values
       .where((r) => !r.retained && !r.explicitDownload && r.leases.isEmpty)
       .fold(0, (sum, r) => sum + r.snapshot.downloadedBytes);
@@ -121,9 +131,18 @@ class TorrentService {
                 await metadataFile.length() > 16 * 1024 * 1024) {
               continue;
             }
+            final requested =
+                json['downloadRequested'] as bool? ??
+                (explicit &&
+                    const {
+                      TorrentTaskState.downloading,
+                      TorrentTaskState.queued,
+                    }.contains(snapshot.state));
             snapshot = snapshot.copyWith(
               state: snapshot.state == TorrentTaskState.completed
                   ? TorrentTaskState.completed
+                  : requested
+                  ? TorrentTaskState.queued
                   : TorrentTaskState.paused,
               streamReady: false,
             );
@@ -137,6 +156,7 @@ class TorrentService {
                 pieceLength: json['pieceLength'] as int,
               ),
               explicitDownload: explicit,
+              downloadRequested: requested,
               retained: retained || explicit,
               selectedFiles: Set<int>.from(
                 json['selectedFiles'] as List? ?? [],
@@ -166,14 +186,11 @@ class TorrentService {
       _server!.listen(
         (request) => unawaited(_serve(request).catchError((Object _) {})),
       );
-      _timer = Timer.periodic(
-        const Duration(seconds: 1),
-        (_) => unawaited(_refresh()),
-      );
       _capability = const TorrentCapability(supported: true, ready: true);
       _capabilityController.add(_capability);
       await _save();
       _emit();
+      _scheduleDownloads();
     } catch (error) {
       _timer?.cancel();
       _timer = null;
@@ -232,6 +249,7 @@ class TorrentService {
     final operation = CancelToken();
     final timer = Timer(metadataTimeout, () => operation.cancel('等待种子信息超时'));
     _metadataTokens.add(operation);
+    _ensureTicker();
     _emit();
     final cancellation = cancelToken?.whenCancel.asStream().listen(
       (_) => operation.cancel('已取消获取种子信息'),
@@ -366,7 +384,6 @@ class TorrentService {
 
   Future<void> startDownload(String taskId, {List<int>? fileIndices}) async {
     await initialize();
-    await _assertNetwork();
     final record = _record(taskId);
     final selection =
         fileIndices?.toSet() ??
@@ -376,16 +393,42 @@ class TorrentService {
             .toSet();
     _validateSelection(record, selection);
     record.explicitDownload = true;
+    record.downloadRequested = true;
     record.retained = true;
     record.selectedFiles = selection;
     await _save();
     await _removeTemporaryMarker(record);
-    final handle = await _activate(record);
+    _ensureTicker();
+    if (!await _networkAllowed()) {
+      record.snapshot = record.snapshot.copyWith(
+        state: TorrentTaskState.queued,
+        notice: '等待 Wi-Fi，连接后自动继续',
+        clearError: true,
+      );
+      await _save();
+      _emit();
+      return;
+    }
+    final TorrentEngineHandle handle;
+    try {
+      handle = await _activate(record);
+    } on _TorrentCapacityException {
+      if (!record.downloadRequested) return;
+      record.snapshot = record.snapshot.copyWith(
+        state: TorrentTaskState.queued,
+        notice: '排队等待连接，空闲后自动继续',
+        clearError: true,
+      );
+      await _save();
+      _emit();
+      return;
+    }
     await handle.download(selection);
     await handle.resume();
     record.snapshot = record.snapshot.copyWith(
       state: TorrentTaskState.downloading,
       clearError: true,
+      clearNotice: true,
     );
     await _save();
     _emit();
@@ -401,8 +444,11 @@ class TorrentService {
     );
   }
 
-  Future<void> pause(String taskId) async {
+  Future<void> pause(String taskId) => _pause(taskId);
+
+  Future<void> _pause(String taskId, {bool automatic = false}) async {
     final record = _record(taskId);
+    if (!automatic) record.downloadRequested = false;
     record.generation++;
     record.openToken?.cancel('Torrent task paused');
     for (final lease in record.leases.toList()) {
@@ -410,15 +456,19 @@ class TorrentService {
     }
     await _stopHandle(record);
     record.snapshot = record.snapshot.copyWith(
-      state: TorrentTaskState.paused,
+      state: automatic && record.downloadRequested
+          ? TorrentTaskState.queued
+          : TorrentTaskState.paused,
       streamReady: false,
       downloadBytesPerSecond: 0,
       uploadBytesPerSecond: 0,
       peers: 0,
+      clearNotice: !automatic,
     );
     await _save();
     _emit();
     await releaseTemporary(taskId);
+    if (!automatic) _scheduleDownloads();
   }
 
   Future<void> cancel(String taskId) async {
@@ -442,6 +492,70 @@ class TorrentService {
     await _save();
     if (deleteFiles) await directory.delete(recursive: true);
     _emit();
+  }
+
+  /// The folder holding a task's downloaded files, when it exists.
+  Future<String?> filesPath(String taskId) async {
+    await initialize();
+    final directory = Directory(p.join(_taskDirectory(taskId).path, 'payload'));
+    return await directory.exists() ? directory.path : null;
+  }
+
+  /// Bytes under the task folders: those of tasks in the list, and leftovers
+  /// nothing uses any more, such as finished playback caches and files that
+  /// older versions kept after a task was deleted.
+  Future<({int tasks, int unused})> storageUsage() async {
+    await initialize();
+    var tasks = 0, unused = 0;
+    final root = Directory(p.join(_directory!.path, 'tasks'));
+    if (!await root.exists()) return (tasks: 0, unused: 0);
+    await for (final entry in root.list(followLinks: false)) {
+      if (entry is! Directory) continue;
+      final size = await _directorySize(entry);
+      final record = _records[p.basename(entry.path)];
+      if (record != null && _inUse(record)) {
+        tasks += size;
+      } else {
+        unused += size;
+      }
+    }
+    return (tasks: tasks, unused: unused);
+  }
+
+  /// Deletes what [storageUsage] counts as unused.
+  Future<void> clearUnused() async {
+    await initialize();
+    await clearInactiveCache();
+    final root = Directory(p.join(_directory!.path, 'tasks'));
+    if (!await root.exists()) return;
+    await for (final entry in root.list(followLinks: false)) {
+      final id = p.basename(entry.path);
+      if (entry is! Directory ||
+          !_validId(id) ||
+          _records.containsKey(id) ||
+          _metadataWriters.containsKey(id)) {
+        continue;
+      }
+      await _guardDirectory(entry);
+      await entry.delete(recursive: true);
+    }
+  }
+
+  static bool _inUse(_TorrentRecord r) =>
+      r.retained ||
+      r.explicitDownload ||
+      r.leases.isNotEmpty ||
+      r.pendingStreams > 0;
+
+  static Future<int> _directorySize(Directory directory) async {
+    var total = 0;
+    await for (final entry in directory.list(
+      recursive: true,
+      followLinks: false,
+    )) {
+      if (entry is File) total += await entry.length();
+    }
+    return total;
   }
 
   Future<void> clearInactiveCache() async {
@@ -489,7 +603,11 @@ class TorrentService {
       final network = await _networkAllowed();
       if (!network && file.downloadedBytes < file.size) await _assertNetwork();
       throwIfTorrentCancelled(cancelToken);
-      final activation = _activate(record, allowNetwork: network);
+      final activation = _activate(
+        record,
+        allowNetwork: network,
+        forPlayback: true,
+      );
       final handle = cancelToken == null
           ? await activation
           : await Future.any([activation, cancelledOpening.future]);
@@ -508,6 +626,7 @@ class TorrentService {
         throwIfTorrentCancelled(cancelToken);
         record.selectedFiles = selected;
         record.explicitDownload = true;
+        record.downloadRequested = true;
         record.retained = true;
         await _save();
         await _removeTemporaryMarker(record);
@@ -517,6 +636,7 @@ class TorrentService {
             ? TorrentTaskState.downloading
             : TorrentTaskState.buffering,
         clearError: true,
+        clearNotice: true,
       );
       _emit();
       final lease = TorrentPlaybackLease(
@@ -590,8 +710,10 @@ class TorrentService {
   Future<TorrentEngineHandle> _activate(
     _TorrentRecord record, {
     bool allowNetwork = true,
+    bool forPlayback = false,
   }) async {
     await record.stopping;
+    _ensureTicker();
     if (record.handle != null) {
       if (record.networkEnabled == allowNetwork) return record.handle!;
       if (record.leases.isNotEmpty) throw StateError('请先结束当前任务的播放，再切换 BT 网络模式');
@@ -608,13 +730,27 @@ class TorrentService {
       if (allowNetwork) await _assertNetwork();
       final active = _records.values.where((r) => r.handle != null).toList();
       if (active.length >= maxActiveTasks) {
-        final idle = active.where((r) => r.leases.isEmpty).firstOrNull;
+        if (!forPlayback) throw const _TorrentCapacityException();
+        final idle = active
+            .where((r) => r.leases.isEmpty && r.pendingStreams == 0)
+            .firstOrNull;
         if (idle == null) throw StateError('已有播放任务占用 BT 引擎，请先结束其中一个播放');
         await _stopHandle(idle);
         idle.snapshot = idle.snapshot.copyWith(
-          state: TorrentTaskState.paused,
+          state: idle.downloadRequested
+              ? TorrentTaskState.queued
+              : TorrentTaskState.paused,
           streamReady: false,
+          notice: idle.downloadRequested ? '为播放让出连接，播放结束后自动继续' : null,
+          downloadBytesPerSecond: 0,
+          uploadBytesPerSecond: 0,
+          peers: 0,
         );
+        if (idle.explicitDownload) {
+          _notify('「${idle.snapshot.title}」正在等待播放释放连接，之后自动继续');
+        }
+        await _save();
+        _emit();
       }
       final payload = Directory(
         p.join(_taskDirectory(record.snapshot.id).path, 'payload'),
@@ -700,8 +836,12 @@ class TorrentService {
         state: TorrentTaskState.paused,
         streamReady: false,
       );
+    } else if (lease.record.leases.isEmpty &&
+        lease.record.snapshot.state == TorrentTaskState.queued) {
+      await _stopHandle(lease.record);
     } else if (lease.record.explicitDownload &&
-        lease.record.snapshot.state != TorrentTaskState.completed) {
+        lease.record.snapshot.state != TorrentTaskState.completed &&
+        lease.record.snapshot.state != TorrentTaskState.queued) {
       lease.record.snapshot = lease.record.snapshot.copyWith(
         state: TorrentTaskState.downloading,
       );
@@ -709,6 +849,7 @@ class TorrentService {
     await _save();
     _emit();
     await releaseTemporary(lease.record.snapshot.id);
+    _scheduleDownloads();
   }
 
   Future<void> _serve(HttpRequest request) async {
@@ -826,29 +967,117 @@ class TorrentService {
   );
   int _requestCounter = 0;
 
+  // Ticks only while a task is resolving or running, so an idle app sleeps.
+  void _ensureTicker() {
+    if (_closed || _timer != null) return;
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _refreshWork ??= _refresh().whenComplete(() => _refreshWork = null);
+    });
+  }
+
+  bool get _hasWork =>
+      _metadataTokens.any((token) => !token.isCancelled) ||
+      _records.values.any(
+        (r) =>
+            r.handle != null ||
+            r.opening != null ||
+            (r.downloadRequested &&
+                r.snapshot.state == TorrentTaskState.queued),
+      );
+
+  void _scheduleDownloads() {
+    if (_closed || _drainingDownloads || _drainWork != null) return;
+    _drainWork = _drainDownloads().whenComplete(() => _drainWork = null);
+  }
+
+  Future<void> _drainDownloads() async {
+    if (_closed || _drainingDownloads) return;
+    _drainingDownloads = true;
+    try {
+      if (!await _networkAllowed()) return;
+      for (final record in _records.values.toList()) {
+        if (_closed) return;
+        if (!record.downloadRequested ||
+            record.snapshot.state != TorrentTaskState.queued ||
+            record.handle != null ||
+            record.opening != null)
+          continue;
+        if (_records.values
+                .where((r) => r.handle != null || r.opening != null)
+                .length >=
+            maxActiveTasks)
+          break;
+        try {
+          await startDownload(
+            record.snapshot.id,
+            fileIndices: record.selectedFiles.toList(),
+          );
+        } catch (error) {
+          if (_closed) return;
+          if (!record.downloadRequested) continue;
+          record.downloadRequested = false;
+          record.snapshot = record.snapshot.copyWith(
+            state: TorrentTaskState.error,
+            error: error.toString(),
+          );
+          await _save();
+          _emit();
+        }
+      }
+    } finally {
+      _drainingDownloads = false;
+    }
+  }
+
+  /// Also callable when network/settings observers report a policy change.
+  Future<void> refreshNetworkPolicy() async {
+    if (_closed) return;
+    if (await _networkAllowed()) {
+      await _drainDownloads();
+      return;
+    }
+    for (final token in _metadataTokens.toList()) {
+      token.cancel('当前网络不允许 BT 下载');
+    }
+    final stopped = _records.values
+        .where(
+          (r) => r.networkEnabled && (r.handle != null || r.opening != null),
+        )
+        .toList();
+    for (final record in stopped) {
+      await _pause(record.snapshot.id, automatic: true);
+      if (_records.containsKey(record.snapshot.id)) {
+        record.snapshot = record.snapshot.copyWith(
+          notice: record.downloadRequested
+              ? '等待 Wi-Fi，连接后自动继续'
+              : '当前不是 Wi-Fi，请连接后重新播放',
+        );
+      }
+    }
+    if (stopped.isNotEmpty) {
+      _notify('当前不是 Wi-Fi，磁力下载等待网络恢复后自动继续');
+      await _save();
+      _emit();
+    }
+  }
+
+  void _notify(String message) {
+    if (!_noticeController.isClosed) _noticeController.add(message);
+  }
+
   Future<void> _refresh() async {
     if (_closed || _refreshing) return;
+    if (!_hasWork) {
+      _timer?.cancel();
+      _timer = null;
+      return;
+    }
     _refreshing = true;
     try {
       if (DateTime.now().difference(_lastPolicyCheck) >=
           const Duration(seconds: 5)) {
         _lastPolicyCheck = DateTime.now();
-        if (!await _networkAllowed()) {
-          for (final token in _metadataTokens.toList()) {
-            token.cancel('当前网络不允许 BT 下载');
-          }
-          for (final record
-              in _records.values
-                  .where(
-                    (r) =>
-                        r.networkEnabled &&
-                        (r.handle != null || r.opening != null),
-                  )
-                  .toList()) {
-            await pause(record.snapshot.id);
-          }
-          return;
-        }
+        await refreshNetworkPolicy();
       }
       for (final record
           in _records.values.where((r) => r.handle != null).toList()) {
@@ -856,6 +1085,7 @@ class TorrentService {
           final data = await record.handle!.snapshot();
           _applySnapshot(record, data);
           if (record.explicitDownload && record.snapshot.progress >= 1) {
+            record.downloadRequested = false;
             record.snapshot = record.snapshot.copyWith(
               state: TorrentTaskState.completed,
             );
@@ -870,8 +1100,10 @@ class TorrentService {
             state: TorrentTaskState.error,
             error: error.toString(),
           );
+          record.downloadRequested = false;
         }
       }
+      await _drainDownloads();
       _emit();
     } finally {
       _refreshing = false;
@@ -937,6 +1169,7 @@ class TorrentService {
                   'snapshot': r.snapshot.toJson(),
                   'pieceLength': r.metadata.pieceLength,
                   'explicitDownload': r.explicitDownload,
+                  'downloadRequested': r.downloadRequested,
                   'retained': r.retained,
                   'selectedFiles': r.selectedFiles.toList(),
                 },
@@ -965,6 +1198,8 @@ class TorrentService {
     for (final record in _records.values) {
       record.openToken?.cancel('Torrent service closed');
     }
+    await _drainWork;
+    await _refreshWork;
     for (final key in _leases.keys.toList()) {
       await _release(key);
     }
@@ -978,6 +1213,7 @@ class TorrentService {
     await _engine.dispose();
     await _tasksController.close();
     await _capabilityController.close();
+    await _noticeController.close();
   }
 }
 
@@ -985,6 +1221,7 @@ class _TorrentRecord {
   TorrentTaskSnapshot snapshot;
   final TorrentMetadata metadata;
   bool explicitDownload;
+  bool downloadRequested;
   bool retained;
   Set<int> selectedFiles;
   TorrentEngineHandle? handle;
@@ -1000,9 +1237,14 @@ class _TorrentRecord {
     this.snapshot,
     this.metadata, {
     this.explicitDownload = false,
+    this.downloadRequested = false,
     this.retained = false,
     Set<int>? selectedFiles,
   }) : selectedFiles = selectedFiles ?? {};
+}
+
+class _TorrentCapacityException implements Exception {
+  const _TorrentCapacityException();
 }
 
 class _LeaseState {

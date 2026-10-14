@@ -4,10 +4,12 @@ import 'package:flutter_modular/flutter_modular.dart';
 import 'package:kazumi/modules/roads/road_module.dart';
 import 'package:kazumi/pages/video/video_playback_args.dart';
 import 'package:kazumi/services/api_video/api_video_service.dart';
+import 'package:kazumi/services/api_video/episode_identity.dart';
 import 'package:kazumi/services/player/automatic_playback_runner.dart';
 import 'package:kazumi/services/player/media_startup_gate.dart';
 import 'package:kazumi/services/player/playback_source_preferences.dart';
 import 'package:kazumi/services/player/rss_playback_status.dart';
+import 'package:kazumi/services/player/playback_stall_monitor.dart';
 import 'package:kazumi/services/rss/rss_playback_resolver.dart';
 import 'package:kazumi/services/rss/rss_models.dart';
 import 'package:kazumi/services/torrent/torrent_models.dart';
@@ -202,10 +204,11 @@ abstract class _VideoPageController with Store implements Disposable {
     if (releases.isEmpty) return null;
     final release = releases.first;
     final key = release.isSpecial
-        ? 'rss-special:${release.specialKey ?? release.key}'
+        ? specialEpisodeKey(release.specialKey ?? release.key)
         : (_requestedRssEpisode ?? release.episodeNumber) == null
         ? null
-        : rssEpisodeKey((_requestedRssEpisode ?? release.episodeNumber)!);
+        : rssEpisodeKey(_rssCatalog?.episodeNumbers[_requestedRssEpisode ?? release.episodeNumber] ??
+            (_requestedRssEpisode ?? release.episodeNumber)!);
     final index = apiEpisodes.indexWhere((episode) => episode.key == key);
     return index < 0 ? null : index + 1;
   }
@@ -321,6 +324,9 @@ abstract class _VideoPageController with Store implements Disposable {
         );
         if (cancellation.isCancelled) return false;
         _rssCatalog = catalog;
+        if (_requestedRssEpisode != null) {
+          _requestedRssEpisode = catalog.episodeNumbers[_requestedRssEpisode] ?? _requestedRssEpisode;
+        }
         _applyOnlineCatalog(
           catalog.episodes,
           'RSS · ${catalog.subscription.group.name}',
@@ -339,6 +345,7 @@ abstract class _VideoPageController with Store implements Disposable {
               _rssCatalog = RssPlaybackCatalog(
                 updated.subscription,
                 releases.values.toList(),
+                episodeNumbers: updated.episodeNumbers,
               );
               final known = apiEpisodes.map((episode) => episode.key).toSet();
               _applyOnlineCatalog([
@@ -541,8 +548,16 @@ abstract class _VideoPageController with Store implements Disposable {
   }) async {
     if (startupSession?.isStale == true) return null;
     if (pageUrl != null && pageUrl.startsWith('monogatari://episode/')) {
+      var targetPageUrl = canonicalEpisodePageUrl(pageUrl);
+      final oldNumber = double.tryParse(Uri.parse(pageUrl).pathSegments.last);
+      if (isRssPlayback && oldNumber != null &&
+          !apiEpisodes.any((episode) => episode.number == oldNumber)) {
+        final corrected = _rssCatalog?.episodeNumbers[oldNumber];
+        if (corrected != null) targetPageUrl =
+            'monogatari://episode/${bangumiItem.id}/${rssEpisodeKey(corrected)}';
+      }
       int find() => apiEpisodes.indexWhere(
-        (episode) => apiEpisodePageUrl(bangumiItem.id, episode) == pageUrl,
+        (episode) => apiEpisodePageUrl(bangumiItem.id, episode) == targetPageUrl,
       );
       var index = find();
       if (index < 0 && isRssPlayback) {
@@ -762,7 +777,9 @@ abstract class _VideoPageController with Store implements Disposable {
       );
       if (history == null) return 0;
       for (final progress in history.progresses.values) {
-        if (progress.episodePageUrl == identity.episodePageUrl) {
+        if (canonicalEpisodePageUrl(progress.episodePageUrl) ==
+            canonicalEpisodePageUrl(identity.episodePageUrl) ||
+            identity.legacyEpisodePageUrls.contains(progress.episodePageUrl)) {
           return progress.progress.inSeconds;
         }
       }
@@ -792,7 +809,17 @@ abstract class _VideoPageController with Store implements Disposable {
       road: episode.originalRoadIndex,
       onlineBangumiSrc: src,
       episodePageUrl: episode.pageUrl,
+      legacyEpisodePageUrls: _legacyRssPageUrls(episode.pageUrl),
     );
+  }
+
+  List<String> _legacyRssPageUrls(String pageUrl) {
+    if (!isRssPlayback || _rssCatalog == null) return const [];
+    final number = double.tryParse(Uri.parse(pageUrl).pathSegments.last);
+    return [for (final entry in _rssCatalog!.episodeNumbers.entries)
+      if (entry.value == number && entry.key != number &&
+          !apiEpisodes.any((episode) => episode.number == entry.key))
+        'monogatari://episode/${bangumiItem.id}/${rssEpisodeKey(entry.key)}'];
   }
 
   void _setOfflineHistoryIdentity(EpisodeRef episode) {
@@ -1153,7 +1180,12 @@ abstract class _VideoPageController with Store implements Disposable {
     final cancellation = CancelToken();
     _playbackCancellation = cancellation;
     PlaybackInitParams? activeParams;
+    String? lastFailure;
     final runner = AutomaticPlaybackRunner<ApiVideoCandidate>(
+      onFailure: (error) {
+        if (error is ApiVideoUnavailableException) lastFailure = error.message;
+        if (error is FormatException) lastFailure = error.message;
+      },
       currentOffset: () => playerController.playback.currentPosition.inSeconds,
       stop: () async {
         _cancelMediaWatch();
@@ -1172,6 +1204,7 @@ abstract class _VideoPageController with Store implements Disposable {
           offset: resumeOffset,
           isLocalPlayback: false,
           videoSourceFormat: candidate.format,
+          publicNetworkOnly: true,
           bangumiId: bangumiItem.id,
           pluginName: apiPlaybackLibraryName,
           episode: resolvedEpisode.listIndex,
@@ -1179,7 +1212,9 @@ abstract class _VideoPageController with Store implements Disposable {
           pageUrl: resolvedEpisode.pageUrl,
           sortNumber: resolvedEpisode.sortNumber,
           httpHeaders: candidate.httpHeaders,
-          adBlockerEnabled: GStorage.getSetting(SettingsKeys.forceAdBlocker),
+          adBlockerEnabled:
+              candidate.adBlocker ||
+              GStorage.getSetting(SettingsKeys.forceAdBlocker),
           episodeTitle: resolvedEpisode.displayTitle,
           referer:
               candidate.httpHeaders['Referer'] ??
@@ -1190,7 +1225,9 @@ abstract class _VideoPageController with Store implements Disposable {
           bangumiName: title,
         );
         activeParams = params;
-        return _openAndWatchMedia(playerController, params, session);
+        final playable = await _openAndWatchMedia(playerController, params, session);
+        if (!playable) lastFailure = '视频连接或解码失败，已尝试备用片源，请重试';
+        return playable;
       },
       onReady: (candidate) {
         if (session.isStale) return;
@@ -1206,7 +1243,7 @@ abstract class _VideoPageController with Store implements Disposable {
         _cancelMediaWatch();
         playerController.onPlaybackError = null;
         unawaited(playerController.stop());
-        _failLoading('已自动尝试全部播放资源，暂时无法播放，请稍后重试');
+        _failLoading(lastFailure ?? '已自动尝试全部播放资源，暂时无法播放，请稍后重试');
       },
     );
     _automaticPlayback = runner;
@@ -1359,6 +1396,8 @@ abstract class _VideoPageController with Store implements Disposable {
     }
   }
 
+  Timer? _qualityTimer;
+
   Future<bool> _openAndWatchMedia(
     PlayerController controller,
     PlaybackInitParams params,
@@ -1444,6 +1483,17 @@ abstract class _VideoPageController with Store implements Disposable {
       );
       complete(playable);
       watchBuffering(player.state.buffering);
+      if (playable && !params.isTorrentStream) {
+        final quality = PlaybackStallMonitor();
+        _qualityTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+          if (!current()) return;
+          quality.update(playing: player.state.playing, buffering: player.state.buffering);
+          if (quality.shouldRecover) {
+            _log('当前片源频繁缓冲，保持进度尝试备用资源');
+            _recoverPlayback(session);
+          }
+        });
+      }
       if (!playable) {
         _log('当前资源不可用，继续自动尝试');
       }
@@ -1485,6 +1535,8 @@ abstract class _VideoPageController with Store implements Disposable {
   }
 
   void _cancelMediaWatch() {
+    _qualityTimer?.cancel();
+    _qualityTimer = null;
     _startupTimer?.cancel();
     _startupTimer = null;
     _bufferingTimer?.cancel();
@@ -1696,7 +1748,7 @@ class EpisodeRef {
       displayTitle: displayTitle,
       pageUrl: pageUrl,
       sortNumber: parsedEpisodeNumber > 0 ? parsedEpisodeNumber : null,
-      historyEpisodeNumber: listIndex,
+      historyEpisodeNumber: episodeHistorySlot(pageUrl, listIndex),
       danmakuEpisodeNumber: contentEpisodeNumber == 0
           ? 0
           : parsedEpisodeNumber > 0

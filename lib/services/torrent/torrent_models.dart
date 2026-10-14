@@ -4,6 +4,7 @@ enum TorrentTaskState {
   metadata,
   downloading,
   buffering,
+  queued,
   paused,
   cancelled,
   completed,
@@ -69,6 +70,9 @@ class TorrentTaskSnapshot {
   final List<TorrentFileInfo> files;
   final bool streamReady;
   final String? error;
+
+  /// Why the app paused this task on its own; not persisted.
+  final String? notice;
   final int? bangumiId;
   final double? episodeNumber;
   final String? releaseKey;
@@ -90,6 +94,7 @@ class TorrentTaskSnapshot {
     this.files = const [],
     this.streamReady = false,
     this.error,
+    this.notice,
     this.bangumiId,
     this.episodeNumber,
     this.releaseKey,
@@ -108,6 +113,8 @@ class TorrentTaskSnapshot {
     bool? streamReady,
     String? error,
     bool clearError = false,
+    String? notice,
+    bool clearNotice = false,
     Map<String, dynamic>? subjectData,
     int? bangumiId,
   }) => TorrentTaskSnapshot(
@@ -125,6 +132,7 @@ class TorrentTaskSnapshot {
     files: files ?? this.files,
     streamReady: streamReady ?? this.streamReady,
     error: clearError ? null : error ?? this.error,
+    notice: clearNotice ? null : notice ?? this.notice,
     bangumiId: bangumiId ?? this.bangumiId,
     episodeNumber: episodeNumber,
     releaseKey: releaseKey,

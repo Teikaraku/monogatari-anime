@@ -659,7 +659,9 @@ abstract class _DownloadController with Store {
             m3u8Url: candidate.url,
             httpHeaders: candidate.httpHeaders,
             sourceFormat: candidate.format,
-            adBlockerEnabled: _repository.getForceAdBlocker(),
+            publicNetworkOnly: true,
+            adBlockerEnabled:
+                candidate.adBlocker || _repository.getForceAdBlocker(),
             episode: downloadEpisode,
             resolveNextCandidate: nextCandidate,
           );

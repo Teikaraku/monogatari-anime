@@ -81,15 +81,15 @@ void main() {
       );
       final history = repository.getHistory('自动播放', item)!;
       expect(
-        history.progresses[1]!.episodePageUrl,
+        history.progresses[3]!.episodePageUrl,
         'monogatari://episode/42/3',
       );
-      expect(history.progresses[1]!.progress.inSeconds, 60);
+      expect(history.progresses[3]!.progress.inSeconds, 60);
       final displaced = history.progresses.values.singleWhere(
         (progress) => progress.episodePageUrl.endsWith('/1'),
       );
       expect(displaced.progress.inSeconds, 30);
-      expect(displaced.episode, isNot(1));
+      expect(displaced.episode, 1);
       expect(history.progresses[displaced.episode], same(displaced));
     },
   );

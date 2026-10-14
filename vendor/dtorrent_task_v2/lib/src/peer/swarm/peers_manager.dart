@@ -152,6 +152,19 @@ class PeersManager with Holepunch, PEX, EventsEmittable<PeerEvent> {
   /// Task is paused
   bool get isPaused => _paused;
 
+  bool _uploadsDisabled = false;
+
+  /// While set, interested peers stay choked so no piece is uploaded.
+  bool get uploadsDisabled => _uploadsDisabled;
+  set uploadsDisabled(bool value) {
+    if (_uploadsDisabled == value) return;
+    _uploadsDisabled = value;
+    for (final peer in _activePeers) {
+      if (peer.isDisposed) continue;
+      peer.sendChoke(value || !peer.interestedMe);
+    }
+  }
+
   /// All peers number. Include the connecting peer.
   int get peersNumber {
     if (_peersAddress.isEmpty) return 0;
@@ -491,7 +504,7 @@ class PeersManager with Holepunch, PEX, EventsEmittable<PeerEvent> {
   }
 
   void _processInterestedChange(PeerInterestedChanged event) {
-    if (event.interested) {
+    if (event.interested && !_uploadsDisabled) {
       event.peer.sendChoke(false);
     } else {
       event.peer.sendChoke(true); // Choke it if not interested.

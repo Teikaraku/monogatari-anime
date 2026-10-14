@@ -3,6 +3,7 @@ import 'package:webdav_client/webdav_client.dart' as webdav;
 import 'package:path_provider/path_provider.dart';
 import 'package:kazumi/modules/history/history_sync.dart';
 import 'package:kazumi/modules/danmaku/danmaku_shield_sync.dart';
+import 'package:kazumi/services/rss/rss_sync.dart';
 import 'package:kazumi/services/storage/storage.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/modules/collect/collect_module.dart';
@@ -18,6 +19,7 @@ class WebDav {
   static const String _historyChangesPath = '$_historyRootPath/changes';
   static const String _historySnapshotPath = '$_historyRootPath/snapshot.json';
   static const String _danmakuShieldPath = '$_syncRootPath/danmakuShield';
+  static const String _rssPath = '$_syncRootPath/rssSubscriptions';
 
   late String webDavURL;
   late String webDavUsername;
@@ -137,6 +139,63 @@ class WebDav {
         } catch (e) {
           KazumiLogger()
               .w('WebDav: failed to clean danmaku shield sync files', error: e);
+        }
+      }
+    });
+  }
+
+  bool get isRssSyncEnabled =>
+      GStorage.getSetting(SettingsKeys.webDavEnable) &&
+      GStorage.getSetting(SettingsKeys.webDavEnableRss);
+
+  /// Every device publishes its merged subscriptions to its own file, so two
+  /// uploads at once never overwrite each other's changes.
+  Future<void> syncRssSubscriptions({
+    required String deviceId,
+    required Future<RssSyncState> Function(RssSyncState) merge,
+  }) {
+    return _runWebDavExclusive(() async {
+      if (!isRssSyncEnabled) return;
+      if (!initialized) await _init();
+      await _ensureLocalTempDirectory();
+      await _ensureRemoteDirectory(_rssPath);
+      final runDirectory =
+          await webDavLocalTempDirectory.createTemp('rss-sync-');
+      try {
+        var remote = RssSyncState();
+        final entries = await client.readDir(_rssPath);
+        var index = 0;
+        for (final entry in entries) {
+          final name = entry.name ?? '';
+          if (entry.isDir == true ||
+              !RegExp(r'^[0-9a-f]{32}\.json$').hasMatch(name)) {
+            continue;
+          }
+          final file = File('${runDirectory.path}/remote-${index++}.json');
+          await client.read2File('$_rssPath/$name', file.path);
+          try {
+            remote = remote.merge(
+              RssSyncState.decode(await file.readAsString()),
+            );
+          } on FormatException catch (e) {
+            KazumiLogger().w('WebDav: skipped invalid RSS sync file', error: e);
+          }
+        }
+        if (!isRssSyncEnabled) return;
+        final merged = await merge(remote);
+        final upload = File('${runDirectory.path}/local.json');
+        await upload.writeAsString(merged.encode(), flush: true);
+        final destination = '$_rssPath/$deviceId.json';
+        await _publishRemoteFile(
+          sourceFilePath: upload.path,
+          destinationPath: destination,
+          temporaryPath: '$destination.cache',
+        );
+      } finally {
+        try {
+          await runDirectory.delete(recursive: true);
+        } catch (e) {
+          KazumiLogger().w('WebDav: failed to clean RSS sync files', error: e);
         }
       }
     });

@@ -13,19 +13,28 @@ class TorrentBackgroundCoordinator {
     this.torrents, {
     BackgroundDownloadService? backgroundService,
     this.onNavigateRequested,
+    this.onNotice,
   }) : background = backgroundService ?? BackgroundDownloadService();
 
   final TorrentService torrents;
   final BackgroundDownloadService background;
   final void Function()? onNavigateRequested;
+
+  /// Shows what the service did on its own, such as pausing a download.
+  final void Function(String message)? onNotice;
   StreamSubscription<List<TorrentTaskSnapshot>>? _subscription;
+  StreamSubscription<String>? _notices;
   bool _started = false;
   bool _disposed = false;
   bool _pausingBlockedWork = false;
   final Map<String, Future<void>> _taskPauses = {};
 
   void start() {
-    if (_started || _disposed || !background.isSupported) return;
+    if (_disposed) return;
+    if (onNotice != null && _notices == null) {
+      _notices = torrents.notices.listen(onNotice);
+    }
+    if (_started || !background.isSupported) return;
     _started = true;
     background.registerOwner(
       BackgroundDownloadOwner.rss,
@@ -54,6 +63,7 @@ class TorrentBackgroundCoordinator {
             TorrentTaskState.metadata,
             TorrentTaskState.downloading,
             TorrentTaskState.buffering,
+            TorrentTaskState.queued,
           }.contains(task.state),
         )
         .toList();
@@ -76,6 +86,7 @@ class TorrentBackgroundCoordinator {
                             TorrentTaskState.metadata,
                             TorrentTaskState.downloading,
                             TorrentTaskState.buffering,
+                            TorrentTaskState.queued,
                           }.contains(task.state),
                     ) ||
                     (pending == 0 && torrents.pendingMetadataCount > 0))) {
@@ -129,6 +140,7 @@ class TorrentBackgroundCoordinator {
             TorrentTaskState.metadata,
             TorrentTaskState.downloading,
             TorrentTaskState.buffering,
+            TorrentTaskState.queued,
           }.contains(task.state),
         )
         .toList();
@@ -157,6 +169,7 @@ class TorrentBackgroundCoordinator {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    await _notices?.cancel();
     await _subscription?.cancel();
     await background.unregisterOwner(BackgroundDownloadOwner.rss);
   }

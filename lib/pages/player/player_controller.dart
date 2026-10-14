@@ -213,6 +213,7 @@ class PlayerController implements Disposable {
         offset: params.offset,
         videoSourceFormat: params.videoSourceFormat,
         isTorrentStream: params.isTorrentStream,
+        publicNetworkOnly: params.publicNetworkOnly,
       );
     } catch (e) {
       if (initialization.isStale) {

@@ -1,5 +1,6 @@
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/modules/history/history_module.dart';
+import 'package:kazumi/services/api_video/episode_identity.dart';
 
 /// One episode in the watch log: when it was last played.
 class WatchedEpisode {
@@ -21,14 +22,20 @@ class WatchActivity {
   WatchActivity._(this._byDay, this.bangumiCount, this.episodeCount);
 
   factory WatchActivity.from(Iterable<History> histories) {
-    final latest = <(int, int), WatchedEpisode>{};
+    final latest = <(int, String), WatchedEpisode>{};
     for (final history in histories) {
       for (final progress in history.progresses.values) {
         // The episode number, not the list position the record is keyed by.
         final episode = progress.episodeNumber;
         final watchedAt = DateTime.fromMillisecondsSinceEpoch(
-            progress.effectiveUpdatedAtMs(history.lastWatchTime));
-        final key = (history.bangumiItem.id, episode);
+          progress.effectiveUpdatedAtMs(history.lastWatchTime),
+        );
+        final key = (
+          history.bangumiItem.id,
+          progress.episodePageUrl.startsWith('monogatari://episode/')
+              ? canonicalEpisodePageUrl(progress.episodePageUrl)
+              : 'episode:$episode',
+        );
         final current = latest[key];
         if (current == null || watchedAt.isAfter(current.watchedAt)) {
           latest[key] = WatchedEpisode(

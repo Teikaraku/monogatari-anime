@@ -639,7 +639,8 @@ class _EpisodeRowState extends State<_EpisodeRow>
                   press),
               borderRadius: restShape,
               clipBehavior: Clip.antiAlias,
-              child: Stack(children: [
+              // Passthrough keeps the ink well as wide as the row, not the text.
+              child: Stack(fit: StackFit.passthrough, children: [
                 child!,
                 if (!widget.first)
                   Positioned(

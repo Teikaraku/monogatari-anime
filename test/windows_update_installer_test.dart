@@ -179,6 +179,28 @@ if ($errors.Count) { $errors | ForEach-Object { $_.Message }; exit 1 }
   );
 
   test(
+    'launch runs the installer outside the app',
+    () async {
+      await File(
+        p.join(app.path, 'flutter_windows.dll'),
+      ).writeAsString('old DLL');
+      await _zip(root, package, _bundle);
+      final prepared = await prepare();
+      await prepared.launch();
+      final log = File(p.join(p.dirname(prepared.scriptPath), 'install.log'));
+      for (var i = 0;
+          i < 300 && (!await log.exists() || await log.length() == 0);
+          i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      expect(await log.exists(), isTrue, reason: 'the installer never ran');
+      expect(await _log(prepared), contains('更新成功'));
+      expect(await executable.readAsString(), 'new executable');
+    },
+    skip: !Platform.isWindows,
+  );
+
+  test(
     'ZipSlip is rejected before extraction or changes outside the staging root',
     () async {
       await _zip(root, package, {..._bundle, '../outside.txt': 'escaped'});

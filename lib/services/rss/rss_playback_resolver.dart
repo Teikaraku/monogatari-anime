@@ -3,22 +3,32 @@ import 'package:kazumi/services/api_video/api_video_models.dart';
 import 'package:kazumi/services/torrent/torrent_models.dart';
 import 'package:kazumi/services/torrent/torrent_service.dart';
 import 'package:kazumi/services/logging/logger.dart';
+import 'package:kazumi/modules/bangumi/episode_item.dart';
+import 'package:kazumi/services/api_video/episode_identity.dart';
 import 'rss_release_title_parser.dart';
 import 'rss_subscription_service.dart';
 
 class RssPlaybackCatalog {
-  const RssPlaybackCatalog(this.subscription, this.releases, {this.refreshed});
+  const RssPlaybackCatalog(
+    this.subscription,
+    this.releases, {
+    this.refreshed,
+    this.episodeNumbers = const {},
+  });
   final RssSubscription subscription;
   final List<RssRelease> releases;
+  final Map<double, double> episodeNumbers;
 
   /// Cached episodes can play while a stale feed is refreshed in parallel.
   final Future<RssPlaybackCatalog?>? refreshed;
-  List<ApiVideoEpisode> get episodes => rssEpisodes(releases);
+  List<ApiVideoEpisode> get episodes =>
+      rssEpisodes(releases, episodeNumbers: episodeNumbers);
 }
 
 /// Adapts a single explicitly selected subtitle group to the existing player.
 class RssPlaybackResolver {
-  RssPlaybackResolver(this.subscriptions, this.torrents);
+  RssPlaybackResolver(this.subscriptions, this.torrents, {this.loadEpisodes});
+  final Future<List<EpisodeInfo>> Function(int)? loadEpisodes;
   final RssSubscriptionService subscriptions;
   final TorrentService torrents;
 
@@ -36,6 +46,18 @@ class RssPlaybackResolver {
       subjectId,
       subscriptionId: subscription.id,
     );
+    var numbering = const <double, double>{};
+    if (loadEpisodes != null) {
+      try {
+        numbering = rssSeasonNumbering(
+          await loadEpisodes!(subjectId).timeout(const Duration(seconds: 6)),
+        );
+      } catch (_) {
+        // Without verified season metadata, retain source numbers. Never
+        // shift from the first available release: earlier episodes may be missing.
+      }
+      _checkCancelled(cancelToken);
+    }
     final hasCache = rssEpisodes(cached).isNotEmpty;
     final last = subscription.lastRefreshedAt;
     final stale =
@@ -55,7 +77,11 @@ class RssPlaybackResolver {
           subscriptionId: subscription.id,
         );
         if (rssEpisodes(releases).isEmpty) return null;
-        return RssPlaybackCatalog(selected!, releases);
+        return RssPlaybackCatalog(
+          selected!,
+          releases,
+          episodeNumbers: numbering,
+        );
       } catch (_) {
         // The subscription service exposes refresh errors. Existing verified
         // releases remain usable even when the feed is temporarily offline.
@@ -68,6 +94,7 @@ class RssPlaybackResolver {
         subscription,
         cached,
         refreshed: stale ? refresh() : null,
+        episodeNumbers: numbering,
       );
     }
     final updated = await refresh();
@@ -91,6 +118,28 @@ class RssPlaybackResolver {
       catalog.releases,
       episode,
       releaseId: releaseId,
+      episodeNumbers: catalog.episodeNumbers,
+    );
+    final sourceNumbers = episode.number == null
+        ? const <double>{}
+        : [
+                if (release.episodeNumber != null) release.episodeNumber!,
+                ...release.episodeNumbers,
+              ]
+              .where(
+                (number) =>
+                    (catalog.episodeNumbers[number] ?? number) ==
+                    episode.number,
+              )
+              .toSet();
+    if (episode.number != null && sourceNumbers.length != 1) {
+      throw const RssException('此资源包含多套集数编号，无法准确定位，请选择单集资源');
+    }
+    final sourceNumber = sourceNumbers.singleOrNull;
+    final sourceEpisode = ApiVideoEpisode(
+      key: episode.key,
+      title: episode.title,
+      number: sourceNumber,
     );
     onStatus?.call('正在获取种子信息 · ${catalog.subscription.group.name}');
     final task = await torrents.add(
@@ -109,7 +158,7 @@ class RssPlaybackResolver {
         cancelToken: cancelToken,
       );
       _checkCancelled(cancelToken);
-      final file = selectRssVideoFile(files, release, episode);
+      final file = selectRssVideoFile(files, release, sourceEpisode);
       onStatus?.call('正在连接做种者并缓冲视频 · ${catalog.subscription.group.name}');
       final lease = await torrents.openStream(
         task.id,
@@ -140,11 +189,20 @@ void _checkCancelled(CancelToken? token) {
 String rssEpisodeKey(double number) =>
     number == number.truncateToDouble() ? '${number.toInt()}' : '$number';
 
-List<ApiVideoEpisode> rssEpisodes(List<RssRelease> releases) {
+Map<double, double> rssSeasonNumbering(List<EpisodeInfo> episodes) => {
+  for (final episode in episodes)
+    if (episode.type == 0 && episode.episode > 0 && episode.displayNumber > 0)
+      episode.episode.toDouble(): episode.displayNumber.toDouble(),
+};
+
+List<ApiVideoEpisode> rssEpisodes(
+  List<RssRelease> releases, {
+  Map<double, double> episodeNumbers = const {},
+}) {
   final result = <String, ApiVideoEpisode>{};
   for (final release in releases) {
     if (release.isSpecial) {
-      final key = 'rss-special:${release.specialKey ?? release.key}';
+      final key = specialEpisodeKey(release.specialKey ?? release.key);
       result.putIfAbsent(
         key,
         () => ApiVideoEpisode(key: key, title: release.title),
@@ -155,10 +213,11 @@ List<ApiVideoEpisode> rssEpisodes(List<RssRelease> releases) {
       if (release.episodeNumber != null) release.episodeNumber!,
       ...release.episodeNumbers,
     ]) {
-      final key = rssEpisodeKey(number);
+      final localNumber = episodeNumbers[number] ?? number;
+      final key = rssEpisodeKey(localNumber);
       result.putIfAbsent(
         key,
-        () => ApiVideoEpisode(key: key, title: '第 $key 话', number: number),
+        () => ApiVideoEpisode(key: key, title: '第 $key 话', number: localNumber),
       );
     }
   }
@@ -172,11 +231,16 @@ RssRelease selectRssRelease(
   List<RssRelease> releases,
   ApiVideoEpisode episode, {
   String? releaseId,
+  Map<double, double> episodeNumbers = const {},
 }) {
   bool matches(RssRelease release) => episode.number != null
-      ? release.matchesEpisode(episode.number!)
+      ? [
+          if (release.episodeNumber != null) release.episodeNumber!,
+          ...release.episodeNumbers,
+        ].any((number) => (episodeNumbers[number] ?? number) == episode.number)
       : release.isSpecial &&
-            episode.key == 'rss-special:${release.specialKey ?? release.key}';
+            canonicalEpisodeKey(episode.key) ==
+                specialEpisodeKey(release.specialKey ?? release.key);
   final matching = releases.where(matches).toList();
   if (releaseId != null) {
     final explicit = matching.where((r) => r.key == releaseId);
@@ -237,7 +301,8 @@ TorrentFileInfo selectRssVideoFile(
     if (!parsed.isBatch &&
         (release.isSpecial
             ? parsed.isSpecial
-                  ? parsed.specialKey == release.specialKey
+                  ? specialEpisodeKey(parsed.specialKey ?? '') ==
+                        specialEpisodeKey(release.specialKey ?? '')
                   : parsed.episodeNumber == null
             : !parsed.isSpecial &&
                   (parsed.episodeNumber == null ||
