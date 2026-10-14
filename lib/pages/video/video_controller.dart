@@ -10,6 +10,7 @@ import 'package:kazumi/services/player/media_startup_gate.dart';
 import 'package:kazumi/services/player/playback_source_preferences.dart';
 import 'package:kazumi/services/player/rss_playback_status.dart';
 import 'package:kazumi/services/player/playback_stall_monitor.dart';
+import 'package:kazumi/services/player/playback_continuity_monitor.dart';
 import 'package:kazumi/services/rss/rss_playback_resolver.dart';
 import 'package:kazumi/services/rss/rss_models.dart';
 import 'package:kazumi/services/torrent/torrent_models.dart';
@@ -1387,10 +1388,12 @@ abstract class _VideoPageController with Store implements Disposable {
     int offset,
     EpisodeRef episode,
     AsyncSession session,
-    PlayerController player,
-  ) async {
+    PlayerController player, {
+    bool resumeStream = false,
+  }) async {
     if (_rssRecovering || session.isStale) return;
     _rssRecovering = true;
+    _loading = true;
     unawaited(_torrentProgress?.cancel());
     _torrentProgress = null;
     _cancelMediaWatch();
@@ -1403,9 +1406,21 @@ abstract class _VideoPageController with Store implements Disposable {
           checkConnection: true,
         );
       } catch (_) {}
-      if (replaced && session.isActive) {
+      final progress = offset;
+      if (!identical(_rssRetrySession, session) ||
+          progress > _rssRetryPosition + 30) {
+        _rssRetrySession = session;
+        _rssResumeAttempts = 0;
+      }
+      final retry = resumeStream && _rssResumeAttempts < 2;
+      if ((replaced || retry) && session.isActive) {
+        if (retry) {
+          _rssResumeAttempts++;
+          _rssRetryPosition = progress;
+        }
         _rssEndpointRecovery = session;
         _log('本地播放连接已恢复，正在继续播放');
+        rssPlayback!.torrents.interruptPlaybackReads(lease);
         await _cleanUpPlayback(player.stop);
         if (session.isStale) return;
         _rssRecovering = false;
@@ -1442,6 +1457,9 @@ abstract class _VideoPageController with Store implements Disposable {
 
   Timer? _qualityTimer;
   AsyncSession? _rssEndpointRecovery;
+  AsyncSession? _rssRetrySession;
+  int _rssResumeAttempts = 0;
+  int _rssRetryPosition = 0;
 
   Future<bool> _openAndWatchMedia(
     PlayerController controller,
@@ -1463,7 +1481,7 @@ abstract class _VideoPageController with Store implements Disposable {
       if (!ready.isCompleted) {
         complete(false);
       } else {
-        _recoverPlayback(session);
+        _recoverPlayback(session, resumeStream: params.isTorrentStream);
       }
       return true;
     };
@@ -1520,6 +1538,18 @@ abstract class _VideoPageController with Store implements Disposable {
         player.stream.playing.listen(
           (_) => watchBuffering(player.state.buffering),
         ),
+        player.stream.completed.listen((completed) {
+          if (completed &&
+              current() &&
+              ready.isCompleted &&
+              !controller.playback.resumedNearEnd &&
+              PlaybackContinuityMonitor.prematureEnd(
+                player.state.position,
+                player.state.duration,
+              )) {
+            _recoverPlayback(session, resumeStream: params.isTorrentStream);
+          }
+        }),
       ]);
       final playable = await waitForFirstVideoFrame(
         firstFrame: videoController.waitUntilFirstFrameRendered,
@@ -1528,15 +1558,29 @@ abstract class _VideoPageController with Store implements Disposable {
       );
       complete(playable);
       watchBuffering(player.state.buffering);
-      if (playable && !params.isTorrentStream) {
+      if (playable) {
         final quality = PlaybackStallMonitor();
+        final continuity = PlaybackContinuityMonitor();
         _qualityTimer = Timer.periodic(const Duration(seconds: 1), (_) {
           if (!current()) return;
+          if (player.state.completed && controller.playback.resumedNearEnd)
+            return;
+          if (continuity.update(
+            playing: player.state.playing,
+            buffering: player.state.buffering,
+            completed: player.state.completed,
+            position: player.state.position,
+            duration: player.state.duration,
+          )) {
+            _log('播放进度中断，正在恢复当前剧集');
+            _recoverPlayback(session, resumeStream: params.isTorrentStream);
+            return;
+          }
           quality.update(
             playing: player.state.playing,
             buffering: player.state.buffering,
           );
-          if (quality.shouldRecover) {
+          if (!params.isTorrentStream && quality.shouldRecover) {
             _log('当前片源频繁缓冲，保持进度尝试备用资源');
             _recoverPlayback(session);
           }
@@ -1557,7 +1601,7 @@ abstract class _VideoPageController with Store implements Disposable {
     }
   }
 
-  void _recoverPlayback(AsyncSession session) {
+  void _recoverPlayback(AsyncSession session, {bool resumeStream = false}) {
     // Defer until the open/ready continuation settles, so an error arriving
     // immediately after the first decoded frame cannot lose its recovery.
     Timer.run(() {
@@ -1573,6 +1617,7 @@ abstract class _VideoPageController with Store implements Disposable {
               episode,
               session,
               player,
+              resumeStream: resumeStream,
             ),
           );
         }

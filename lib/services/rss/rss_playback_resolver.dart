@@ -31,6 +31,40 @@ class RssPlaybackResolver {
   final Future<List<EpisodeInfo>> Function(int)? loadEpisodes;
   final RssSubscriptionService subscriptions;
   final TorrentService torrents;
+  final _numbering = <int, (DateTime, Map<double, double>)>{};
+  final _numberingFlights = <int, Future<Map<double, double>>>{};
+
+  Future<Map<double, double>> _loadNumbering(int subjectId) {
+    final loader = loadEpisodes;
+    if (loader == null) return Future.value(const {});
+    final cached = _numbering[subjectId];
+    if (cached != null && DateTime.now().isBefore(cached.$1)) {
+      return Future.value(cached.$2);
+    }
+    return _numberingFlights.putIfAbsent(subjectId, () async {
+      try {
+        final numbers = rssSeasonNumbering(
+          await Future<List<EpisodeInfo>>.sync(
+            () => loader(subjectId),
+          ).timeout(const Duration(seconds: 6)),
+        );
+        _numbering.remove(subjectId);
+        _numbering[subjectId] = (
+          DateTime.now().add(const Duration(minutes: 15)),
+          numbers,
+        );
+        while (_numbering.length > 64) {
+          _numbering.remove(_numbering.keys.first);
+        }
+        return numbers;
+      } catch (_) {
+        // Failed requests do not replace a previously verified season mapping.
+        return cached?.$2 ?? const {};
+      } finally {
+        _numberingFlights.remove(subjectId);
+      }
+    });
+  }
 
   Future<RssPlaybackCatalog> load(
     int subjectId, {
@@ -46,18 +80,9 @@ class RssPlaybackResolver {
       subjectId,
       subscriptionId: subscription.id,
     );
-    var numbering = const <double, double>{};
-    if (loadEpisodes != null) {
-      try {
-        numbering = rssSeasonNumbering(
-          await loadEpisodes!(subjectId).timeout(const Duration(seconds: 6)),
-        );
-      } catch (_) {
-        // Without verified season metadata, retain source numbers. Never
-        // shift from the first available release: earlier episodes may be missing.
-      }
-      _checkCancelled(cancelToken);
-    }
+    // Fetch the feed and verified numbering together, then retain the mapping
+    // for subsequent episode switches instead of waiting for Bangumi each time.
+    final numberingReady = _loadNumbering(subjectId);
     final hasCache = rssEpisodes(cached).isNotEmpty;
     final last = subscription.lastRefreshedAt;
     final stale =
@@ -77,6 +102,8 @@ class RssPlaybackResolver {
           subscriptionId: subscription.id,
         );
         if (rssEpisodes(releases).isEmpty) return null;
+        final numbering = await numberingReady;
+        _checkCancelled(cancelToken);
         return RssPlaybackCatalog(
           selected!,
           releases,
@@ -90,10 +117,13 @@ class RssPlaybackResolver {
     }
 
     if (hasCache) {
+      final refreshed = stale ? refresh() : null;
+      final numbering = await numberingReady;
+      _checkCancelled(cancelToken);
       return RssPlaybackCatalog(
         subscription,
         cached,
-        refreshed: stale ? refresh() : null,
+        refreshed: refreshed,
         episodeNumbers: numbering,
       );
     }

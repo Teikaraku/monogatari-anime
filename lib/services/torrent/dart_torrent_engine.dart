@@ -100,7 +100,12 @@ class DartTorrentEngine implements TorrentEngine {
       if (map['error'] != null) {
         completer.completeError(StateError(map['error'] as String));
       } else {
-        completer.complete(map['result']);
+        final result = map['result'];
+        completer.complete(
+          result is TransferableTypedData
+              ? result.materialize().asUint8List()
+              : result,
+        );
       }
     });
     final arguments = [receive.sendPort, allowLoopbackPeers];
@@ -325,7 +330,14 @@ void _torrentWorker(List<dynamic> arguments) {
         message['command'] as String,
         Map<String, dynamic>.from(message['arguments'] as Map),
       );
-      output.send({'id': id, 'result': result});
+      // Copy only the delivered range into a transferable buffer, rather than
+      // sending a view backed by a whole verified piece across isolates.
+      output.send({
+        'id': id,
+        'result': message['command'] == 'read'
+            ? TransferableTypedData.fromList([result as Uint8List])
+            : result,
+      });
     } catch (error) {
       output.send({'id': id, 'error': error.toString()});
     } finally {
@@ -681,6 +693,10 @@ class _WorkerTask {
   bool closed = false;
   Future<void>? _closing;
   final verified = <int>{};
+  static const _pieceCacheLimit = 4 * 1024 * 1024;
+  final _pieceCache = <int, Uint8List>{};
+  final _verificationFlights = <int, Future<Uint8List>>{};
+  int _pieceCacheBytes = 0;
   Object? _failure;
   Completer<void> _piecesChanged = Completer<void>();
 
@@ -821,11 +837,25 @@ class _WorkerTask {
           (model.files[reader.$1].offset + reader.$2) ~/ model.pieceLength;
       priority.add(current);
     }
-    task.setStreamingUrgentPieces(priority);
+    final urgent = <int>{...priority};
     for (final reader in readers.values) {
       final file = model.files[reader.$1];
       final current = (file.offset + reader.$2) ~/ model.pieceLength;
       final end = (file.end - 1) ~/ model.pieceLength;
+      // Finish the next short runway before a slow peer can strand its final
+      // block. Hedging only the HTTP reader's current piece is already too late
+      // once the decoder consumes its last few seconds of buffered packets.
+      final urgentAhead = max(
+        1,
+        (2 * 1024 * 1024 + model.pieceLength - 1) ~/ model.pieceLength,
+      );
+      for (
+        var piece = current;
+        piece < min(current + urgentAhead, end + 1);
+        piece++
+      ) {
+        urgent.add(piece);
+      }
       // A fixed four-piece window can be only 64 KiB on small-piece torrents.
       // Bound lookahead by bytes so playback keeps a useful, temporary buffer.
       final ahead = max(
@@ -846,6 +876,7 @@ class _WorkerTask {
       for (var index = 0; index < model.pieces!.length; index++)
         if (!wanted.contains(index)) index,
     ]);
+    task.setStreamingUrgentPieces(urgent, wantedPieces: wanted);
     if (paused || wanted.isEmpty) {
       task.setStreamingUrgentPieces(const []);
       task.pause();
@@ -972,18 +1003,23 @@ class _WorkerTask {
         throw StateError('Torrent read was cancelled');
       }
       final manager = task.fileManager!;
-      if (!verified.contains(piece)) {
-        final full = await manager.readFile(
-          piece,
-          0,
-          min(model.pieceLength, model.totalSize - piece * model.pieceLength),
-        );
-        if (full == null || !_hashMatches(piece, full)) {
-          throw const FileSystemException(
-            'Torrent piece integrity check failed',
-          );
-        }
-        verified.add(piece);
+      var content = _pieceCache.remove(piece);
+      if (content != null) _pieceCache[piece] = content;
+      if (content == null &&
+          (!verified.contains(piece) ||
+              _verificationFlights.containsKey(piece))) {
+        content = await Future.any<Uint8List>([
+          _verifiedPiece(piece),
+          token.whenCancel.then((error) => throw error),
+        ]);
+      }
+      throwIfTorrentCancelled(token);
+      if (closed || paused || !readers.containsKey(reader)) {
+        throw StateError('Torrent read was cancelled');
+      }
+      if (content != null) {
+        final begin = file.offset + offset - piece * model.pieceLength;
+        return Uint8List.sublistView(content, begin, begin + end);
       }
       final data = await Future.any<List<int>>([
         manager.files[fileIndex].requestRead(offset, end),
@@ -998,6 +1034,40 @@ class _WorkerTask {
     }
   }
 
+  Future<Uint8List> _verifiedPiece(int piece) =>
+      _verificationFlights.putIfAbsent(piece, () async {
+        try {
+          final full = await task.fileManager!.readFile(
+            piece,
+            0,
+            min(model.pieceLength, model.totalSize - piece * model.pieceLength),
+          );
+          if (full == null || !_hashMatches(piece, full)) {
+            throw const FileSystemException(
+              'Torrent piece integrity check failed',
+            );
+          }
+          if (closed) throw StateError('Torrent task is closed');
+          verified.add(piece);
+          final bytes = full is Uint8List ? full : Uint8List.fromList(full);
+          // Reuse the data already read for SHA-1 instead of immediately
+          // reading the same range again. Memory remains bounded even when
+          // head, tail and seek readers verify different pieces concurrently.
+          if (bytes.length <= _pieceCacheLimit) {
+            while (_pieceCacheBytes + bytes.length > _pieceCacheLimit) {
+              _pieceCacheBytes -= _pieceCache
+                  .remove(_pieceCache.keys.first)!
+                  .length;
+            }
+            _pieceCache[piece] = bytes;
+            _pieceCacheBytes += bytes.length;
+          }
+          return bytes;
+        } finally {
+          _verificationFlights.remove(piece);
+        }
+      });
+
   Future<void> pause() async {
     paused = true;
     _notifyReadiness();
@@ -1011,6 +1081,8 @@ class _WorkerTask {
   Future<void> _close() async {
     closed = true;
     readers.clear();
+    _pieceCache.clear();
+    _pieceCacheBytes = 0;
     _notifyReadiness();
     if (offline) return;
     task.pause();

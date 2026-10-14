@@ -32,6 +32,7 @@ class PublicVideoProxy {
   final _sockets = <Socket>{};
   final _clients = <Socket>{};
   final _acceptedByPort = <int, Socket>{};
+  final _preferredByPort = <int, InternetAddress>{};
   bool _closed = false;
   String get realm => 'Monogatari media';
   int get port => _server!.port;
@@ -50,6 +51,81 @@ class PublicVideoProxy {
   Future<ConnectionTask<Socket>> secureConnectionTask(Uri target) async {
     if (_closed || !isPublicVideoUri(target))
       throw const FormatException('片源地址不符合安全要求');
+    final addresses = await _lookup(
+      target.host,
+    ).timeout(const Duration(seconds: 5));
+    if (addresses.isEmpty || addresses.any((ip) => !_allowAddress(ip))) {
+      throw const FormatException('片源指向非公开网络');
+    }
+    final candidates = addresses.toSet().take(4).toList();
+    final ready = Completer<Socket>();
+    final tasks = <ConnectionTask<Socket>>[];
+    var next = 0, active = 0;
+    var cancelled = false;
+    Timer? hedge;
+    void cancel() {
+      cancelled = true;
+      hedge?.cancel();
+      for (final task in tasks) {
+        task.cancel();
+      }
+    }
+
+    void launch() {
+      if (cancelled || ready.isCompleted || next >= candidates.length) return;
+      final address = candidates[next++];
+      active++;
+      unawaited(() async {
+        ConnectionTask<Socket>? task;
+        try {
+          task = await _secureToAddress(target, address);
+          tasks.add(task);
+          if (cancelled || ready.isCompleted) {
+            task.cancel();
+            return;
+          }
+          final socket = await task.socket.timeout(
+            const Duration(seconds: 8),
+            onTimeout: () {
+              task!.cancel();
+              throw TimeoutException('Video TLS handshake timed out');
+            },
+          );
+          if (cancelled || ready.isCompleted) {
+            socket.destroy();
+            return;
+          }
+          ready.complete(socket);
+          hedge?.cancel();
+          for (final other in tasks) {
+            if (!identical(other, task)) other.cancel();
+          }
+        } catch (error, stack) {
+          task?.cancel();
+          if (!cancelled &&
+              !ready.isCompleted &&
+              next >= candidates.length &&
+              active == 1) {
+            ready.completeError(error, stack);
+          }
+        } finally {
+          active--;
+          if (!cancelled && !ready.isCompleted) launch();
+        }
+      }());
+    }
+
+    launch();
+    hedge = Timer(const Duration(milliseconds: 250), () {
+      if (active < 2) launch();
+    });
+    return ConnectionTask.fromSocket(ready.future, cancel);
+  }
+
+  Future<ConnectionTask<Socket>> _secureToAddress(
+    Uri target,
+    InternetAddress address,
+  ) async {
     final task = await Socket.startConnect(InternetAddress.loopbackIPv4, port);
     Socket? connection;
     int? sourcePort;
@@ -66,6 +142,7 @@ class PublicVideoProxy {
     final ready = task.socket.then<Socket>((socket) async {
       connection = socket;
       sourcePort = socket.port;
+      _preferredByPort[sourcePort!] = address;
       _Headers? input;
       try {
         if (cancelled || _closed)
@@ -93,6 +170,7 @@ class PublicVideoProxy {
         connection?.destroy();
         rethrow;
       } finally {
+        _preferredByPort.remove(sourcePort);
         await input?.cancel();
       }
     });
@@ -113,7 +191,7 @@ class PublicVideoProxy {
     Socket? upstream;
     _Headers? input;
     var established = false;
-    if (_closed || _clients.length >= 16) {
+    if (_closed || _clients.length >= 24) {
       await _reject(client, 503);
       return;
     }
@@ -156,7 +234,15 @@ class PublicVideoProxy {
       if (addresses.isEmpty || addresses.any((ip) => !_allowAddress(ip))) {
         throw const FormatException('片源指向非公开网络');
       }
-      final tunnel = await _open(target, addresses, proxyForUri?.call(target));
+      final preferred = _preferredByPort[sourcePort];
+      if (preferred != null && !addresses.contains(preferred)) {
+        throw const FormatException('片源连接地址已失效');
+      }
+      final tunnel = await _open(
+        target,
+        preferred == null ? addresses : [preferred],
+        proxyForUri?.call(target),
+      );
       upstream = tunnel.$1;
       upstream.setOption(SocketOption.tcpNoDelay, true);
       _sockets.add(upstream);

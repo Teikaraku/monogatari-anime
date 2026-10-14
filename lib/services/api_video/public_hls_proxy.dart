@@ -8,14 +8,15 @@ import 'api_video_url_policy.dart';
 import 'public_video_proxy.dart';
 import 'package:kazumi/utils/m3u8_ad_filter.dart';
 
-/// Browser-like HTTP pooling and a four-segment lookahead for short VOD
+/// Browser-like HTTP pooling and bounded lookahead for short VOD
 /// segments. Everything is scoped to one player and retained only in memory.
 class PublicHlsProxy {
   PublicHlsProxy({
     required this.source,
     this.headers = const {},
     this.proxyForUri,
-    this.lookahead = 4,
+    this.lookahead = 8,
+    this.startPosition = Duration.zero,
     this.maxSegmentBytes = 8 * 1024 * 1024,
     this.maxCacheBytes = 32 * 1024 * 1024,
     this.onFetch,
@@ -23,13 +24,15 @@ class PublicHlsProxy {
     this.adBlockerEnabled = false,
     HttpClient? client,
     bool Function(Uri)? allowUri,
-  }) : _injectedClient = client,
+  }) : assert(lookahead >= 1 && lookahead <= 12),
+       _injectedClient = client,
        _allowUri = allowUri ?? isPublicVideoUri;
 
   final Uri source;
   final Map<String, String> headers;
   final Uri? Function(Uri)? proxyForUri;
   final int lookahead;
+  final Duration startPosition;
   final int maxSegmentBytes;
   final int maxCacheBytes;
   final bool adBlockerEnabled;
@@ -44,6 +47,9 @@ class PublicHlsProxy {
   final _ids = <Uri, String>{};
   final _cache = <String, Uint8List>{};
   final _pending = <String, Future<Uint8List?>>{};
+  final _loads = <String, _SegmentLoad>{};
+  final _playlistFlights = <Uri, Future<String>>{};
+  final _playlists = <Uri, String>{};
   final _uncacheable = <String>{};
   final _responseUris = Expando<Uri>();
   final _clients = <HttpRequest>{};
@@ -66,7 +72,9 @@ class PublicHlsProxy {
         await route.start();
         _client = HttpClient()
           ..connectionTimeout = const Duration(seconds: 8)
-          ..maxConnectionsPerHost = lookahead
+          // Keep a connection available for a seek or key request while the
+          // previous speculative window is still downloading.
+          ..maxConnectionsPerHost = lookahead + 1
           ..idleTimeout = const Duration(seconds: 30);
         _client.findProxy = (_) => 'DIRECT';
         _client.connectionFactory = (uri, _, _) =>
@@ -135,7 +143,11 @@ class PublicHlsProxy {
     throw const HttpException('Too many redirects');
   }
 
-  Future<Uint8List> _read(HttpClientResponse response, int limit) async {
+  Future<Uint8List> _read(
+    HttpClientResponse response,
+    int limit, {
+    void Function(Uint8List)? onChunk,
+  }) async {
     if (response.statusCode != 200) {
       await response.listen((_) {}).cancel();
       throw HttpException('Video response ${response.statusCode}');
@@ -146,6 +158,9 @@ class PublicHlsProxy {
         throw const _ResourceTooLarge();
       }
       bytes.add(chunk);
+      if (onChunk != null) {
+        onChunk(chunk is Uint8List ? chunk : Uint8List.fromList(chunk));
+      }
     }
     return bytes.takeBytes();
   }
@@ -158,15 +173,27 @@ class PublicHlsProxy {
       return Future.value(cached);
     }
     return _pending.putIfAbsent(id, () async {
+      final load = _loads[id] = _SegmentLoad();
       final clock = Stopwatch()..start();
       try {
         final response = await _get(_resources[id]!.url);
         if (response.contentLength > maxSegmentBytes) {
           await response.listen((_) {}).cancel();
           _uncacheable.add(id);
+          load.head.complete(null);
+          load.finish();
           return null;
         }
-        final bytes = await _read(response, maxSegmentBytes);
+        if (response.statusCode == 200) {
+          load.head.complete(
+            response.compressionState ==
+                    HttpClientResponseCompressionState.decompressed
+                ? -1
+                : response.contentLength,
+          );
+        }
+        final bytes = await _read(response, maxSegmentBytes, onChunk: load.add);
+        load.finish();
         onFetch?.call(
           _resources[id]!.url,
           clock.elapsedMilliseconds,
@@ -184,13 +211,16 @@ class PublicHlsProxy {
         }
         return bytes;
       } on _ResourceTooLarge {
+        load.fail(const _ResourceTooLarge());
         _uncacheable.add(id);
         return null;
       } catch (error) {
+        load.fail(error);
         if (!_closed) onFailure?.call(_resources[id]!.url, error);
         rethrow;
       } finally {
         _pending.remove(id);
+        _loads.remove(id);
       }
     });
   }
@@ -198,33 +228,58 @@ class PublicHlsProxy {
   void _lookAhead(_HlsResource resource) {
     final group = resource.group;
     if (group == null || resource.index < 0) return;
+    var seconds = resource.duration;
     for (final id in group.skip(resource.index + 1).take(lookahead - 1)) {
       if (_closed || _pending.length >= lookahead) break;
+      if (seconds >= 12) break;
+      seconds += _resources[id]!.duration;
       if (!_resources[id]!.prefetch ||
           _cache.containsKey(id) ||
-          _pending.containsKey(id))
+          _pending.containsKey(id)) {
         continue;
+      }
       // A speculative failure does not fail the requested segment. The actual
       // player request retries it or continues to the next provider normally.
       unawaited(_segment(id).then<void>((_) {}, onError: (Object _) {}));
     }
   }
 
-  Future<String> _playlist(_HlsResource resource) async {
+  Future<String> _playlist(_HlsResource resource) {
+    final cached = _playlists[resource.url];
+    if (cached != null) return Future.value(cached);
+    return _playlistFlights.putIfAbsent(
+      resource.url,
+      () => _loadPlaylist(resource).whenComplete(() {
+        _playlistFlights.remove(resource.url);
+      }),
+    );
+  }
+
+  Future<String> _loadPlaylist(_HlsResource resource) async {
     final response = await _get(resource.url);
     final effective = _responseUris[response]!;
     var raw = utf8.decode(await _read(response, 1024 * 1024));
-    if (!raw.trimLeft().startsWith('#EXTM3U'))
+    if (!raw.trimLeft().startsWith('#EXTM3U')) {
       throw const FormatException('不是有效的视频清单');
-    if (adBlockerEnabled)
+    }
+    if (adBlockerEnabled) {
       raw = M3u8AdFilter.filterPlaylist(raw, effective.toString());
+    }
     final out = <String>[];
     final segments = <String>[];
+    final starts = <double>[];
+    final durations = <double>[];
+    var seconds = 0.0;
+    var segmentDuration = 0.0;
     var variant = false;
     var ranged = false;
     for (final line in const LineSplitter().convert(raw)) {
       final text = line.trim();
       if (text.startsWith('#')) {
+        if (text.startsWith('#EXTINF:')) {
+          segmentDuration =
+              double.tryParse(text.substring(8).split(',').first) ?? 0;
+        }
         variant = text.startsWith('#EXT-X-STREAM-INF') || variant;
         if (text.startsWith('#EXT-X-BYTERANGE')) ranged = true;
         final rewritten = line.replaceAllMapped(RegExp(r'URI="([^"]+)"'), (
@@ -246,7 +301,13 @@ class PublicHlsProxy {
           playlist: playlist,
           prefetch: !playlist && !ranged,
         );
-        if (!playlist) segments.add(id);
+        if (!playlist) {
+          segments.add(id);
+          starts.add(seconds);
+          durations.add(segmentDuration);
+          seconds += segmentDuration;
+          segmentDuration = 0;
+        }
         out.add(_local(id).toString());
         variant = false;
         ranged = false;
@@ -258,8 +319,29 @@ class PublicHlsProxy {
       final segment = _resources[segments[i]]!;
       segment.group = segments;
       segment.index = i;
+      segment.duration = durations[i];
     }
-    return '${out.join('\n')}\n';
+    final manifest = '${out.join('\n')}\n';
+    if (raw.contains('#EXT-X-ENDLIST') || raw.contains('#EXT-X-STREAM-INF:')) {
+      // VOD and master manifests are immutable for this player. Live feeds
+      // continue to refresh, and rejected/partial responses are never cached.
+      if (_playlists.length < 8) _playlists[resource.url] = manifest;
+    }
+    if (raw.contains('#EXT-X-ENDLIST') && segments.isNotEmpty) {
+      var index = 0;
+      final target = startPosition.inMilliseconds / 1000;
+      for (var i = 0; i < starts.length; i++) {
+        if (starts[i] <= target) index = i;
+      }
+      final first = _resources[segments[index]]!;
+      if (first.prefetch && !_closed) {
+        unawaited(
+          _segment(segments[index]).then<void>((_) {}, onError: (Object _) {}),
+        );
+        _lookAhead(first);
+      }
+    }
+    return manifest;
   }
 
   Future<void> _serve(HttpRequest request) async {
@@ -297,7 +379,43 @@ class PublicHlsProxy {
         final range = request.headers.value(HttpHeaders.rangeHeader);
         if (resource.prefetch && request.method == 'GET') {
           final pending = _segment(parts.last);
+          pending.ignore();
+          final load = _loads[parts.last];
           _lookAhead(resource);
+          if (load != null) {
+            final size = await load.head.future;
+            if (size != null && size > 0) {
+              final selection = _range(range, size);
+              if (selection == null) {
+                response.statusCode = 416;
+                response.headers.set(
+                  HttpHeaders.contentRangeHeader,
+                  'bytes */$size',
+                );
+                return;
+              }
+              response.bufferOutput = false;
+              response.contentLength = selection.$2 - selection.$1 + 1;
+              response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
+              if (range != null) {
+                response.statusCode = 206;
+                response.headers.set(
+                  HttpHeaders.contentRangeHeader,
+                  'bytes ${selection.$1}-${selection.$2}/$size',
+                );
+              }
+              // Deliver the verified origin's bytes as they arrive. Waiting for
+              // an entire multi-MiB TS segment adds seconds before decoding.
+              await for (final chunk in load.replayRange(
+                selection.$1,
+                selection.$2,
+              )) {
+                response.add(chunk);
+                await response.flush();
+              }
+              return;
+            }
+          }
           final bytes = await pending;
           if (bytes != null) {
             final selection = _range(range, bytes.length);
@@ -363,6 +481,7 @@ class PublicHlsProxy {
     await _route?.close();
     await _server?.close(force: true);
     _cache.clear();
+    _playlists.clear();
     _cacheBytes = 0;
   }
 
@@ -386,6 +505,83 @@ class _ResourceTooLarge implements Exception {
   const _ResourceTooLarge();
 }
 
+class _SegmentLoad {
+  final head = Completer<int?>();
+  final _chunks = <Uint8List>[];
+  final _events = StreamController<Uint8List>.broadcast(sync: true);
+  bool _finished = false;
+  Object? _failure;
+
+  _SegmentLoad() {
+    head.future.ignore();
+  }
+
+  void add(Uint8List bytes) {
+    _chunks.add(bytes);
+    _events.add(bytes);
+  }
+
+  void finish() {
+    if (_finished) return;
+    _finished = true;
+    unawaited(_events.close());
+  }
+
+  void fail(Object error) {
+    _failure = error;
+    if (!head.isCompleted) head.completeError(error);
+    if (!_finished) _events.addError(error);
+    finish();
+  }
+
+  Stream<Uint8List> replay() {
+    StreamSubscription<Uint8List>? subscription;
+    late final StreamController<Uint8List> output;
+    output = StreamController<Uint8List>(
+      onListen: () {
+        // Subscribe before replaying the prefix so no arrival can fall between
+        // the buffered bytes and the live stream. HTTP pause never blocks the
+        // shared origin fetch or other readers of this segment.
+        if (!_finished) {
+          subscription = _events.stream.listen(
+            output.add,
+            onError: output.addError,
+            onDone: output.close,
+          );
+        }
+        for (final chunk in _chunks) {
+          output.add(chunk);
+        }
+        if (_finished) {
+          if (_failure != null) output.addError(_failure!);
+          unawaited(output.close());
+        }
+      },
+      onCancel: () => subscription?.cancel(),
+    );
+    return output.stream;
+  }
+
+  /// A seek can use the already arriving segment prefix without waiting for
+  /// unrelated trailing bytes. Ending one range does not cancel the shared
+  /// origin fetch: other readers and the bounded complete cache still use it.
+  Stream<Uint8List> replayRange(int start, int end) async* {
+    var offset = 0;
+    await for (final chunk in replay()) {
+      final next = offset + chunk.length;
+      if (next > start && offset <= end) {
+        yield Uint8List.sublistView(
+          chunk,
+          max(0, start - offset),
+          min(chunk.length, end + 1 - offset),
+        );
+      }
+      offset = next;
+      if (offset > end) return;
+    }
+  }
+}
+
 class _HlsResource {
   _HlsResource(this.url, this.playlist, this.prefetch);
   final Uri url;
@@ -393,4 +589,5 @@ class _HlsResource {
   final bool prefetch;
   List<String>? group;
   int index = -1;
+  double duration = 0;
 }

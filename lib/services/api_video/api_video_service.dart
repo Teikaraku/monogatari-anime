@@ -27,11 +27,13 @@ class ApiVideoService {
     this.cacheTtl = const Duration(minutes: 5),
     this.providerTimeout = const Duration(seconds: 15),
     this.providerPreferenceWait = const Duration(milliseconds: 1200),
+    this.aliasHedgeDelay = const Duration(milliseconds: 250),
     this.maxCachedProviders = 96,
     this.maxResponseBytes = 8 * 1024 * 1024,
     DateTime Function()? clock,
   }) : assert(maxCachedProviders > 0),
        assert(!providerPreferenceWait.isNegative),
+       assert(!aliasHedgeDelay.isNegative),
        _dio = dio,
        _transport = transport,
        _clock = clock ?? DateTime.now;
@@ -44,6 +46,7 @@ class ApiVideoService {
 
   /// Prefer the configured order briefly, then use an already-ready backup.
   final Duration providerPreferenceWait;
+  final Duration aliasHedgeDelay;
   final int maxCachedProviders;
   final int maxResponseBytes;
   final Map<String, _CachedTitles> _cache = {};
@@ -395,41 +398,106 @@ class ApiVideoService {
         .where((v) => v.isNotEmpty)
         .toSet();
     if (expected.isEmpty) return const [];
-    for (final keyword in _searchKeywords(names)) {
-      _checkCancelled(token);
-      final document = await _providerRequest(provider, {
-        'ac': 'detail',
-        'wd': keyword,
-        'pg': '1',
-      }, token);
-      final rows = _rows(document);
-      final pages = int.tryParse(_text(document['pagecount'])) ?? 1;
-      // Only matching search results are paged, never crawl a site's entire
-      // library. Typical anime searches fit on one page.
-      for (var page = 2; page <= pages && page <= 3; page++) {
-        if ((await _matchingTitles(
-          provider,
-          rows,
-          expected,
-          year,
-        )).isNotEmpty) {
-          break;
-        }
-        rows.addAll(
-          _rows(
-            await _providerRequest(provider, {
-              'ac': 'detail',
-              'wd': keyword,
-              'pg': '$page',
-            }, token),
-          ),
-        );
-      }
-      final parsed = await _matchingTitles(provider, rows, expected, year);
-      _checkCancelled(token);
-      if (parsed.isNotEmpty) return parsed;
+    final keywords = _searchKeywords(names).toList();
+    if (keywords.length == 1) {
+      return _searchKeyword(provider, keywords.single, expected, year, token);
     }
-    return const [];
+    final scope = CancelToken();
+    final cancellation = token.whenCancel.asStream().listen(scope.cancel);
+    final result = Completer<List<_ProviderTitle>>();
+    var next = 0;
+    var active = 0;
+    Object? failure;
+    Timer? hedge;
+    void launch() {
+      if (result.isCompleted || scope.isCancelled || next >= keywords.length) {
+        return;
+      }
+      final keyword = keywords[next++];
+      active++;
+      unawaited(() async {
+        try {
+          final titles = await _searchKeyword(
+            provider,
+            keyword,
+            expected,
+            year,
+            scope,
+          );
+          if (titles.isNotEmpty && !result.isCompleted) result.complete(titles);
+        } catch (error) {
+          failure ??= error;
+        } finally {
+          active--;
+          if (!result.isCompleted) {
+            if (next < keywords.length) {
+              launch();
+            } else if (active == 0) {
+              if (failure != null) {
+                result.completeError(failure!);
+              } else {
+                result.complete(const []);
+              }
+            }
+          }
+        }
+      }());
+    }
+
+    // Keep at most two aliases in flight per provider. A slow or empty first
+    // spelling must not hold up a valid translated title for several seconds.
+    launch();
+    hedge = Timer(aliasHedgeDelay, () {
+      if (active < 2) launch();
+    });
+    try {
+      final titles = await Future.any([
+        result.future,
+        token.whenCancel.then<List<_ProviderTitle>>((error) => throw error),
+      ]);
+      _checkCancelled(token);
+      return titles;
+    } finally {
+      hedge.cancel();
+      scope.cancel('已完成资源站搜索');
+      await cancellation.cancel();
+    }
+  }
+
+  Future<List<_ProviderTitle>> _searchKeyword(
+    ApiVideoProvider provider,
+    String keyword,
+    Set<String> expected,
+    int? year,
+    CancelToken token,
+  ) async {
+    _checkCancelled(token);
+    final document = await _providerRequest(provider, {
+      'ac': 'detail',
+      'wd': keyword,
+      'pg': '1',
+    }, token);
+    final rows = _rows(document);
+    final pages = int.tryParse(_text(document['pagecount'])) ?? 1;
+    // Only matching search results are paged, never crawl a site's entire
+    // library. Typical anime searches fit on one page.
+    for (var page = 2; page <= pages && page <= 3; page++) {
+      if ((await _matchingTitles(provider, rows, expected, year)).isNotEmpty) {
+        break;
+      }
+      rows.addAll(
+        _rows(
+          await _providerRequest(provider, {
+            'ac': 'detail',
+            'wd': keyword,
+            'pg': '$page',
+          }, token),
+        ),
+      );
+    }
+    final parsed = await _matchingTitles(provider, rows, expected, year);
+    _checkCancelled(token);
+    return parsed;
   }
 
   Future<List<_ProviderTitle>> _matchingTitles(

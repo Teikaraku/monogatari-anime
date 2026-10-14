@@ -37,6 +37,35 @@ void main() {
   });
 
   test(
+    'interrupting a stale player read keeps its cached task and permits reopening',
+    () async {
+      final task = await service.add(source);
+      final lease = await service.openStream(task.id, 0);
+      engine.blockReads = true;
+      final pending = client
+          .getUrl(lease.url)
+          .then((request) => request.close())
+          .then((response) => response.drain<void>());
+      final cancelled = expectLater(pending, throwsA(isA<Exception>()));
+      await engine.readStarted.future;
+      service.interruptPlaybackReads(lease);
+      await cancelled.timeout(const Duration(seconds: 1));
+      expect(engine.readCancelled, isTrue);
+      expect(engine.handles.single.closed, isFalse);
+      engine.blockReads = false;
+      final replacement = await service.openStream(task.id, 0);
+      await lease.close();
+      final response = await (await client.getUrl(replacement.url)).close();
+      expect(
+        await response.fold<List<int>>([], (out, bytes) => out..addAll(bytes)),
+        engine.data,
+      );
+      expect(engine.handles, hasLength(1));
+      await replacement.close();
+    },
+  );
+
+  test(
     'rebinds a closed playback port without losing the active torrent lease',
     () async {
       await service.dispose();

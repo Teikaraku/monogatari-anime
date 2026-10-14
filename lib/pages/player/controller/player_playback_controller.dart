@@ -248,8 +248,8 @@ abstract class _PlayerPlaybackController with Store {
   /// demuxer then burns through ffmpeg's reconnect/segment retries and marks
   /// the stream EOF, leaving playback permanently stuck once foregrounded.
   /// Suspending zeroes the readahead window so no new requests are issued
-  /// while buffered data stays available; restore values are mpv defaults,
-  /// which media_kit leaves untouched. Writes are serialized and apply the
+  /// while buffered data stays available; restore the current cache policy.
+  /// Writes are serialized and apply the
   /// latest requested state, so rapid lifecycle flips cannot reorder.
   Future<void> setPrefetchSuspended(bool suspended) async {
     if (!Platform.isAndroid) {
@@ -257,21 +257,11 @@ abstract class _PlayerPlaybackController with Store {
     }
     _prefetchSuspendWanted = suspended;
     await _prefetchWrites.run(() async {
-      final wanted = _prefetchSuspendWanted;
-      final player = mediaPlayer;
-      if (player == null) {
-        return;
-      }
       try {
-        final pp = player.platform as NativePlayer;
-        await pp.setProperty('cache-secs', wanted ? '0' : '36000');
-        if (!isCurrentPlayer(player)) {
-          return;
-        }
-        await pp.setProperty('demuxer-readahead-secs', wanted ? '0' : '1');
+        await cachePolicy.setPrefetchSuspended(_prefetchSuspendWanted);
       } catch (e) {
         KazumiLogger().w(
-          'PlayerController: failed to ${wanted ? 'suspend' : 'resume'} demuxer prefetch',
+          'PlayerController: failed to update demuxer prefetch',
           error: e,
         );
       }
@@ -309,6 +299,7 @@ abstract class _PlayerPlaybackController with Store {
             source: Uri.parse(videoUrl()),
             headers: httpHeaders,
             adBlockerEnabled: adBlockerEnabled,
+            startPosition: Duration(seconds: offset),
             onFailure: (uri, error) => KazumiLogger().w(
               'PlayerRelay: ${uri.host} request failed',
               error: error.runtimeType.toString(),

@@ -5,6 +5,7 @@ import 'package:kazumi/services/network/metered_network_service.dart';
 import 'package:kazumi/services/player/low_memory_mode.dart';
 import 'package:kazumi/utils/async_serial_queue.dart';
 import 'package:media_kit/media_kit.dart';
+import 'adaptive_rebuffer_policy.dart';
 
 class PlaybackCachePolicy {
   PlaybackCachePolicy({
@@ -26,6 +27,15 @@ class PlaybackCachePolicy {
   final AsyncSerialQueue _writes = AsyncSerialQueue();
 
   StreamSubscription<void>? _settingsSubscription;
+  Timer? _bufferTimer;
+  Player? _tunedPlayer;
+  AdaptiveRebufferPolicy? _rebuffer;
+  bool _prefetchSuspended = false;
+
+  Future<void> setPrefetchSuspended(bool value) async {
+    _prefetchSuspended = value;
+    await apply();
+  }
 
   bool get networkAutomatic =>
       LowMemoryMode.current == LowMemoryMode.auto &&
@@ -51,6 +61,11 @@ class PlaybackCachePolicy {
   }
 
   void stopWatching() {
+    _bufferTimer?.cancel();
+    _bufferTimer = null;
+    _tunedPlayer = null;
+    _rebuffer = null;
+    _prefetchSuspended = false;
     MeteredNetworkService.listenable.removeListener(_onChanged);
     unawaited(_settingsSubscription?.cancel());
     _settingsSubscription = null;
@@ -76,9 +91,22 @@ class PlaybackCachePolicy {
           (bufferSize ~/ 4).toString(),
         );
         if (!_isLocalPlayback()) {
+          _watchBuffer(player);
           await pp.setProperty('cache-on-disk', 'no');
-          await pp.setProperty('cache-secs', _isTorrentStream() ? '30' : '60');
-          await pp.setProperty('cache-pause-wait', '3');
+          await pp.setProperty(
+            'cache-secs',
+            _prefetchSuspended
+                ? '0'
+                : _isTorrentStream()
+                ? '90'
+                : '60',
+          );
+          await pp.setProperty(
+            'demuxer-readahead-secs',
+            _prefetchSuspended ? '0' : '1',
+          );
+          await pp.setProperty('cache-pause', 'yes');
+          await pp.setProperty('cache-pause-wait', '${_rebuffer!.waitSeconds}');
           await pp.setProperty('cache-pause-initial', 'yes');
         }
       });
@@ -88,6 +116,36 @@ class PlaybackCachePolicy {
         error: e,
       );
     }
+  }
+
+  void _watchBuffer(Player player) {
+    if (identical(_tunedPlayer, player)) return;
+    _bufferTimer?.cancel();
+    _tunedPlayer = player;
+    final tuning = _rebuffer = AdaptiveRebufferPolicy(
+      torrent: _isTorrentStream(),
+    );
+    _bufferTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!identical(_currentPlayer(), player) || _prefetchSuspended) return;
+      final state = player.state;
+      final wait = tuning.update(
+        playing: state.playing && !state.completed,
+        buffering: state.buffering,
+        position: state.position,
+      );
+      if (wait == null) return;
+      unawaited(
+        _writes.run(() async {
+          if (!identical(_currentPlayer(), player)) return;
+          try {
+            await (player.platform as NativePlayer).setProperty(
+              'cache-pause-wait',
+              '$wait',
+            );
+          } catch (_) {}
+        }),
+      );
+    });
   }
 
   void _onChanged() {

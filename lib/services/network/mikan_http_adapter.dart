@@ -16,6 +16,7 @@ class MikanHttpAdapter implements HttpClientAdapter {
     this.discoveryTimeout = const Duration(seconds: 8),
     this.hedgeDelay = const Duration(milliseconds: 250),
     this.hosts = const {'mikanani.me'},
+    this.maxResponseBytes = 8 * 1024 * 1024,
     http.Client Function()? createEchClient,
     http.Client Function()? createSecondaryEchClient,
   }) : _fallback = fallback,
@@ -29,6 +30,7 @@ class MikanHttpAdapter implements HttpClientAdapter {
   final http.Client Function()? _createSecondaryEchClient;
   final Duration discoveryTimeout;
   final Duration hedgeDelay;
+  final int maxResponseBytes;
 
   /// Only explicitly configured Cloudflare hosts use the encrypted transport.
   final Set<String> hosts;
@@ -164,8 +166,19 @@ class MikanHttpAdapter implements HttpClientAdapter {
           await response.stream.listen((_) {}).cancel();
           throw http.ClientException('Mikan encrypted endpoint unavailable');
         }
+        // A fast 200 header is not a usable result if that edge never delivers
+        // its body. Race complete, bounded documents instead of cancelling a
+        // healthy backup as soon as the first response headers arrive.
+        final content = BytesBuilder(copy: false);
+        await for (final bytes in response.stream.timeout(
+          options.receiveTimeout ?? discoveryTimeout,
+        )) {
+          if (content.length + bytes.length > maxResponseBytes) {
+            throw http.ClientException('Encrypted response too large');
+          }
+          content.add(bytes);
+        }
         if (ready.isCompleted || abort.isCompleted) {
-          await response.stream.listen((_) {}).cancel();
           cancel(attempt);
           return;
         }
@@ -173,7 +186,17 @@ class MikanHttpAdapter implements HttpClientAdapter {
         for (final other in attempts) {
           if (!identical(other, attempt)) cancel(other);
         }
-        ready.complete(response);
+        ready.complete(
+          http.StreamedResponse(
+            Stream.value(content.takeBytes()),
+            response.statusCode,
+            headers: response.headers,
+            contentLength: response.contentLength,
+            reasonPhrase: response.reasonPhrase,
+            isRedirect: response.isRedirect,
+            request: response.request,
+          ),
+        );
       } catch (error, stack) {
         cancel(attempt);
         failures++;

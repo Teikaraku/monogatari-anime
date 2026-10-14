@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:kazumi/services/player/playback_continuity_monitor.dart';
 import 'dart:io';
 import 'package:kazumi/pages/player/player_item_panel.dart';
 import 'package:kazumi/pages/player/player_keyboard_shortcuts.dart';
@@ -1265,7 +1266,14 @@ class _PlayerItemState extends State<PlayerItem>
               playingSelection.episode,
               forward: true,
             );
-      if (playerController.playback.completed && !videoPageController.loading) {
+      if (playerController.playback.completed &&
+          !videoPageController.loading &&
+          (playerController.playback.resumedNearEnd ||
+              videoPageController.isOfflineMode ||
+              !PlaybackContinuityMonitor.prematureEnd(
+                playerController.playback.playerPosition,
+                playerController.playback.playerDuration,
+              ))) {
         if (playerController.playback.resumedNearEnd) {
           // Replay stale near-end resumes instead of advancing to the next episode.
           unawaited(playerController.playback.restartFromBeginning());

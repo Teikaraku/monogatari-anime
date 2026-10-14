@@ -2,11 +2,54 @@ import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
+import 'package:kazumi/modules/bangumi/episode_item.dart';
 import 'package:kazumi/services/rss/rss_playback_resolver.dart';
 import 'package:kazumi/services/rss/rss_subscription_service.dart';
 import 'package:kazumi/services/torrent/torrent_service.dart';
 
 void main() {
+  test(
+    'feed refresh and season numbering overlap, and episode switches reuse verified numbering',
+    () async {
+      final source = _Subscriptions()..saved = [];
+      final metadata = Completer<List<EpisodeInfo>>();
+      var loads = 0;
+      final resolver = RssPlaybackResolver(
+        source,
+        _NoTorrents(),
+        loadEpisodes: (_) {
+          loads++;
+          return metadata.future;
+        },
+      );
+      try {
+        final pending = resolver.load(42);
+        await Future<void>.delayed(Duration.zero);
+        expect(source.refreshes, 1);
+        expect(loads, 1);
+        source.saved = [_release(13)];
+        source.refreshDone.complete();
+        metadata.complete([
+          EpisodeInfo(
+            id: 1,
+            episode: 13,
+            seasonEpisode: 1,
+            type: 0,
+            name: '',
+            nameCn: '',
+          ),
+        ]);
+        expect((await pending).episodes.single.number, 1);
+        source.selected = source.selected.copyWith(
+          lastRefreshedAt: DateTime.now(),
+        );
+        expect((await resolver.load(42)).episodes.single.number, 1);
+        expect(loads, 1);
+      } finally {
+        source.dispose();
+      }
+    },
+  );
   late _Subscriptions subscriptions;
   late RssPlaybackResolver resolver;
   setUp(() {

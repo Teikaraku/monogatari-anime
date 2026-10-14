@@ -690,6 +690,26 @@ class TorrentService {
       _leases[key] = state;
       record.leases.add(key);
       await handle.resume();
+      // Connect to seeders and fetch container metadata while the native
+      // renderer initializes. MP4 commonly stores its index at the file tail.
+      state.probes.add('$key-head');
+      await handle.setReader('$key-head', file.index, 0);
+      if (const {
+        '.mp4',
+        '.m4v',
+        '.mov',
+      }.contains(p.extension(file.name).toLowerCase())) {
+        state.probes.add('$key-tail');
+        await handle.setReader(
+          '$key-tail',
+          file.index,
+          max(0, file.size - 1024 * 1024),
+        );
+      }
+      state.probeTimer = Timer(
+        const Duration(seconds: 15),
+        () => unawaited(_clearProbes(state)),
+      );
       throwIfTorrentCancelled(cancelToken);
       if (downloadWhilePlaying) {
         final selected = {...record.selectedFiles, fileIndex};
@@ -900,6 +920,7 @@ class TorrentService {
   Future<void> _release(String key) async {
     final lease = _leases.remove(key);
     if (lease == null) return;
+    await _clearProbes(lease);
     await lease.cancellation?.cancel();
     lease.record.leases.remove(key);
     for (final token in lease.requests.values) {
@@ -1014,7 +1035,7 @@ class TorrentService {
           reader,
           lease.file.index,
           offset,
-          min(64 * 1024, range.$2 - offset + 1),
+          min(256 * 1024, range.$2 - offset + 1),
           cancelToken: token,
         );
         throwIfTorrentCancelled(token);
@@ -1026,6 +1047,7 @@ class TorrentService {
         offset += block.length;
         lease.record.snapshot = lease.record.snapshot.copyWith(
           streamReady: true,
+          clearError: true,
           state: lease.record.explicitDownload
               ? TorrentTaskState.downloading
               : TorrentTaskState.buffering,
@@ -1046,6 +1068,28 @@ class TorrentService {
       try {
         await response.close();
       } catch (_) {}
+    }
+  }
+
+  Future<void> _clearProbes(_LeaseState lease) async {
+    lease.probeTimer?.cancel();
+    lease.probeTimer = null;
+    final probes = lease.probes.toList();
+    lease.probes.clear();
+    for (final probe in probes) {
+      try {
+        await lease.handle.removeReader(probe);
+      } catch (_) {}
+    }
+  }
+
+  /// Interrupt stale native readers while preserving cached pieces, the swarm
+  /// and lease ownership for a reopening at the same playback position.
+  void interruptPlaybackReads(TorrentPlaybackLease playback) {
+    final lease = _leases[playback.url.pathSegments.last];
+    if (lease == null) return;
+    for (final token in lease.requests.values.toList()) {
+      token.cancel('正在恢复播放连接');
     }
   }
 
@@ -1340,6 +1384,8 @@ class _TorrentCapacityException implements Exception {
 }
 
 class _LeaseState {
+  final probes = <String>{};
+  Timer? probeTimer;
   final String key;
   final _TorrentRecord record;
   final TorrentFileInfo file;

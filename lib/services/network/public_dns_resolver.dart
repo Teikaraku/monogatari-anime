@@ -139,7 +139,8 @@ class PublicDnsResolver {
   }
 }
 
-/// Race the preferred IPv4/IPv6 routes. Cancellation also closes late sockets.
+/// Race a bounded set of CDN edges, interleaving IPv4/IPv6 when available.
+/// Cancellation also closes late sockets.
 Future<ConnectionTask<Socket>> publicConnectionTask(
   List<InternetAddress> addresses,
   int port,
@@ -150,6 +151,10 @@ Future<ConnectionTask<Socket>> publicConnectionTask(
     candidates.add(alternate.first);
   } else if (addresses.length > 1)
     candidates.add(addresses[1]);
+  for (final address in addresses) {
+    if (candidates.length >= 4) break;
+    if (!candidates.contains(address)) candidates.add(address);
+  }
   final ready = Completer<Socket>();
   final tasks = <ConnectionTask<Socket>>[];
   var cancelled = false;

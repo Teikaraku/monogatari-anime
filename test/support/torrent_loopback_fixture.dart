@@ -73,7 +73,13 @@ class TorrentLoopbackFixture {
       'info': info,
       'announce': 'http://127.0.0.1:${tracker.port}/announce',
     });
-    seeder.listen(_accept);
+    seeder.listen(
+      _accept,
+      onError: (Object error) {
+        if (error is! SocketException || error.osError?.errorCode != 10053)
+          throw error;
+      },
+    );
     tracker.listen((request) async {
       if (request.uri.path == '/fixture.torrent') {
         request.response.add(torrentBytes);
@@ -112,6 +118,9 @@ class TorrentLoopbackFixture {
 
   void _accept(Socket socket) {
     _sockets.add(socket);
+    // Delayed fixture replies may race a production CANCEL/connection close.
+    // The socket sink's completion also reports those write-side errors.
+    socket.done.ignore();
     var pending = <int>[];
     var handshake = false;
     var metadataId = 1;
@@ -250,11 +259,15 @@ class TorrentLoopbackFixture {
   }
 
   Future<void> close() async {
+    disconnectPeers();
+    await seeder.close();
+    await tracker.close(force: true);
+  }
+
+  void disconnectPeers() {
     for (final socket in _sockets.toList()) {
       socket.destroy();
     }
     _sockets.clear();
-    await seeder.close();
-    await tracker.close(force: true);
   }
 }

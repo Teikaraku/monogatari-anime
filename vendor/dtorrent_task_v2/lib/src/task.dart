@@ -183,7 +183,8 @@ abstract class TorrentTask with EventsEmittable<TaskEvent> {
   void requestPieces(Peer peer, [int pieceIndex = -1]);
 
   /// Playback's currently needed pieces, excluding forward buffering.
-  void setStreamingUrgentPieces(Iterable<int> pieces);
+  void setStreamingUrgentPieces(Iterable<int> pieces,
+      {Iterable<int>? wantedPieces});
   PieceManager? get pieceManager;
 
   /// Pause task
@@ -590,6 +591,7 @@ class _TorrentTask
   final Set<String> _peerIds = {};
   final Map<Peer, Timer> _streamPeerCooldown = {};
   final Set<int> _streamUrgentPieces = {};
+  Set<int>? _streamWantedPieces;
   Timer? _streamUrgentTimer;
 
   late String
@@ -1027,6 +1029,7 @@ class _TorrentTask
     if (event.event == null) return;
     _applyTrackerExternalIp(event.event!);
     var ps = event.event!.peers;
+    _log.fine('Tracker discovered ${ps.length} peer endpoints');
     if (ps.isNotEmpty) {
       for (var url in ps) {
         _processNewPeerFound(url, PeerSource.tracker);
@@ -1354,7 +1357,12 @@ class _TorrentTask
     if (allowLoopbackPeers) {
       _peersManager?.ignoreIps.remove(InternetAddress.loopbackIPv4);
     }
-    _serverSocketListener = _serverSocket?.listen(_hookInPeer);
+    _serverSocketListener =
+        _serverSocket?.listen(_hookInPeer, onError: (Object error) {
+      // An aborted incoming TCP handshake is a peer failure, not a task failure.
+      // Leaving this unhandled terminates the shared BT worker isolate.
+      _log.fine('Incoming BT connection failed', error);
+    });
 
     // Try to forward port automatically (non-blocking)
     if (_localDiscoveryEnabled) _forwardPortIfAvailable();
@@ -1606,6 +1614,7 @@ class _TorrentTask
   void _processRejectRequest(PeerRejectEvent event) {
     var piece = _pieceManager?[event.index];
     piece?.pushSubPieceLast(event.begin ~/ defaultRequestLength);
+    _wakeStreamingPeers();
   }
 
   void _processPeerDispose(PeerDisposeEvent event) {
@@ -1623,6 +1632,20 @@ class _TorrentTask
     for (var index in completedPieces) {
       _pieceManager![index]?.removeAvailablePeer(event.peer);
     }
+    _wakeStreamingPeers();
+  }
+
+  bool _streamWakeScheduled = false;
+  void _wakeStreamingPeers() {
+    if (!stream || _stopping || _streamWakeScheduled) return;
+    _streamWakeScheduled = true;
+    Timer.run(() {
+      _streamWakeScheduled = false;
+      if (_stopping || state != TaskState.running) return;
+      for (final peer in _peersManager?.activePeers ?? <Peer>[]) {
+        if (!peer.chokeMe && !peer.isDisposed) requestPieces(peer);
+      }
+    });
   }
 
   void _pushSubPiecesBack(List<List<int>> requests) {
@@ -1674,7 +1697,7 @@ class _TorrentTask
       event.peer.requestDeadline = const Duration(seconds: 6);
       // TCP already controls congestion. Keep several block requests in flight
       // instead of downloading one 16 KiB block per round trip on slower links.
-      if (event.peer.type == PeerType.tcp) event.peer.minimumRequestWindow = 5;
+      if (event.peer.type == PeerType.tcp) event.peer.minimumRequestWindow = 8;
     }
 
     // In superseeding mode, don't send bitfield (masquerade as peer with no data)
@@ -1893,6 +1916,9 @@ class _TorrentTask
   void requestPieces(Peer peer, [int pieceIndex = -1]) async {
     if (_pieceManager == null || _peersManager == null) return;
     if (_streamPeerCooldown.containsKey(peer) || peer.isDisposed) return;
+    // A full pipeline cannot accept a hedge or another block. Avoid repeatedly
+    // scanning every swarm request and popping/reinserting the same subpiece.
+    if (!peer.hasRequestCapacity) return;
     _advancedSelector?.setLocalPeerEndpoint(
       _peersManager?.localExternalIP,
       port: _serverSocket?.port ?? 0,
@@ -1903,7 +1929,10 @@ class _TorrentTask
       return;
     }
     Piece? piece;
-    if (pieceIndex != -1) {
+    if (pieceIndex != -1 &&
+        (!stream ||
+            peer.chokeMe &&
+                _streamWantedPieces?.contains(pieceIndex) != false)) {
       // a specific piece requested
       piece = _pieceManager![pieceIndex];
       // if the piece is available but doesn't have available subpiece,
@@ -1953,10 +1982,23 @@ class _TorrentTask
   }
 
   @override
-  void setStreamingUrgentPieces(Iterable<int> pieces) {
+  void setStreamingUrgentPieces(Iterable<int> pieces,
+      {Iterable<int>? wantedPieces}) {
     _streamUrgentPieces
       ..clear()
       ..addAll(pieces);
+    if (wantedPieces != null && stream) {
+      final wanted = wantedPieces.toSet();
+      _streamWantedPieces = wanted;
+      for (final peer in _peersManager?.activePeers ?? <Peer>[]) {
+        for (final request in List<List<int>>.of(peer.requestBuffer)) {
+          if (wanted.contains(request[0])) continue;
+          peer.requestCancel(request[0], request[1], request[2]);
+          _pieceManager?[request[0]]
+              ?.pushSubPiece(request[1] ~/ defaultRequestLength);
+        }
+      }
+    }
     if (_streamUrgentPieces.isEmpty || _stopping) {
       _streamUrgentTimer?.cancel();
       _streamUrgentTimer = null;
@@ -1973,25 +2015,30 @@ class _TorrentTask
   bool _hedgeUrgentBlock(Peer peer) {
     if (_pieceManager == null || _peersManager == null) return false;
     final peers = _peersManager!.activePeers.toList();
+    final pending = <(int, int, int), (Peer, List<int>)>{};
+    final duplicated = <(int, int, int)>{};
+    for (final other in peers) {
+      for (final request in other.requestBuffer) {
+        if (!_streamUrgentPieces.contains(request[0])) continue;
+        final key = (request[0], request[1], request[2]);
+        if (pending.containsKey(key)) duplicated.add(key);
+        pending[key] = (other, request);
+      }
+    }
     final now = DateTime.now().microsecondsSinceEpoch;
     for (final index in _streamUrgentPieces) {
       if (_pieceManager![index]?.isCompleted != false ||
           !peer.remoteCompletePieces.contains(index)) {
         continue;
       }
-      for (final other in peers) {
-        if (other == peer) continue;
-        for (final request in other.requestBuffer) {
-          if (request[0] != index || now - request[3] < 1000000) continue;
-          // At most two copies of a waiting urgent block; no whole-file
-          // endgame or redundant forward-buffer downloads.
-          final holders = peers
-              .where((p) => p.requestBuffer.any((r) =>
-                  r[0] == index && r[1] == request[1] && r[2] == request[2]))
-              .toList();
-          if (holders.length != 1 || holders.contains(peer)) continue;
-          return peer.sendRequest(index, request[1], request[2]);
-        }
+      for (final entry in pending.entries) {
+        final request = entry.value.$2;
+        if (entry.value.$1 == peer ||
+            duplicated.contains(entry.key) ||
+            request[0] != index ||
+            now - request[3] < 1000000) continue;
+        // At most two copies of each waiting urgent block.
+        return peer.sendRequest(index, request[1], request[2]);
       }
     }
     return false;

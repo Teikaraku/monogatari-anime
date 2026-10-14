@@ -6,6 +6,32 @@ import 'package:kazumi/services/network/public_dns_resolver.dart';
 
 void main() {
   test(
+    'a third healthy CDN edge is tried when the first two refuse connections',
+    () async {
+      final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final peers = <Socket>[];
+      server.listen(peers.add);
+      Socket? socket;
+      try {
+        final task = await publicConnectionTask([
+          InternetAddress('127.0.0.2'),
+          InternetAddress('127.0.0.3'),
+          InternetAddress.loopbackIPv4,
+        ], server.port);
+        socket = await task.socket.timeout(const Duration(seconds: 2));
+        expect(socket.remoteAddress, InternetAddress.loopbackIPv4);
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        expect(peers, hasLength(1));
+      } finally {
+        socket?.destroy();
+        for (final peer in peers) {
+          peer.destroy();
+        }
+        await server.close();
+      }
+    },
+  );
+  test(
     'failed system DNS and VPN fake IPs recover through public encrypted answers',
     () async {
       for (final failed in [true, false]) {

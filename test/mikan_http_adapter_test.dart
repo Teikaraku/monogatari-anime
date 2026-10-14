@@ -90,6 +90,48 @@ void main() {
   });
 
   test(
+    'fast headers with a stalled body cannot cancel the healthy backup',
+    () async {
+      encrypted.stallBody = true;
+      final hedged = MikanHttpAdapter(
+        fallback: plain,
+        proxyForUri: (_) => null,
+        createEchClient: () => encrypted,
+        createSecondaryEchClient: () => _EncryptedClient(),
+        hedgeDelay: const Duration(milliseconds: 5),
+      );
+      addTearDown(() => hedged.close(force: true));
+      final response = await hedged
+          .fetch(_options('/RSS/Classic'), null, null)
+          .timeout(const Duration(seconds: 1));
+      expect(await response.stream.toList(), isNotEmpty);
+      await Future<void>.delayed(Duration.zero);
+      expect(encrypted.aborted, isTrue);
+      expect(plain.requests, isEmpty);
+    },
+  );
+
+  test(
+    'oversized encrypted documents are rejected before reaching the parser',
+    () async {
+      final bounded = MikanHttpAdapter(
+        fallback: plain,
+        proxyForUri: (_) => null,
+        createEchClient: () => encrypted,
+        maxResponseBytes: 4,
+      );
+      addTearDown(() => bounded.close(force: true));
+      final response = await bounded.fetch(
+        _options('/RSS/Classic'),
+        null,
+        null,
+      );
+      await response.stream.drain<void>();
+      expect(plain.requests, hasLength(1));
+    },
+  );
+
+  test(
     'Mikan direct RSS and torrent metadata use the encrypted route',
     () async {
       for (final path in [
@@ -234,6 +276,7 @@ class _EncryptedClient extends http.BaseClient {
   final started = Completer<void>();
   bool fail = false;
   bool waitForAbort = false;
+  bool stallBody = false;
   bool aborted = false;
   bool closed = false;
   int status = 200;
@@ -249,9 +292,18 @@ class _EncryptedClient extends http.BaseClient {
       throw http.RequestAbortedException();
     }
     return http.StreamedResponse(
-      Stream.value('encrypted HTTPS'.codeUnits),
+      stallBody
+          ? _stalledBody(request as http.Abortable)
+          : Stream.value('encrypted HTTPS'.codeUnits),
       status,
     );
+  }
+
+  Stream<List<int>> _stalledBody(http.Abortable request) async* {
+    yield [1];
+    await request.abortTrigger;
+    aborted = true;
+    throw http.RequestAbortedException();
   }
 
   @override

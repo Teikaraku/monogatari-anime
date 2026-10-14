@@ -518,13 +518,17 @@ abstract class Peer
   /// - 3: send time
   /// - 4: resend times
   bool addRequest(int index, int begin, int length) {
-    var maxCount = currentWindow;
-    // maxCount = oldCount;
-    if (remoteReqq != null) maxCount = min(remoteReqq!, maxCount);
-    if (_requestBuffer.length >= maxCount) return false;
+    if (!hasRequestCapacity) return false;
     _requestBuffer
         .add([index, begin, length, DateTime.now().microsecondsSinceEpoch, 0]);
     return true;
+  }
+
+  bool get hasRequestCapacity {
+    var maxCount = currentWindow;
+    // maxCount = oldCount;
+    if (remoteReqq != null) maxCount = min(remoteReqq!, maxCount);
+    return _requestBuffer.length < maxCount;
   }
 
   bool get isSleeping {
@@ -2041,6 +2045,17 @@ class TCPConnectException implements Exception {
 }
 
 class _TCPPeer extends Peer {
+  Future<void>? _closingTcp;
+  Socket? _watchedSink;
+
+  void _watchSink(Socket socket) {
+    if (identical(_watchedSink, socket)) return;
+    _watchedSink = socket;
+    unawaited(socket.done.then<void>((_) {}, onError: (Object error) {
+      if (!isDisposed) unawaited(dispose(error));
+    }));
+  }
+
   Socket? _socket;
   final ProxyManager? _proxyManager;
   final SSLConfig? _sslConfig;
@@ -2067,7 +2082,10 @@ class _TCPPeer extends Peer {
   Future<Stream<Uint8List>?> connectRemote(int? timeout) async {
     timeout ??= 30;
     try {
-      if (_socket != null) return _socket;
+      if (_socket != null) {
+        _watchSink(_socket!);
+        return _socket;
+      }
 
       Socket rawSocket;
 
@@ -2096,6 +2114,9 @@ class _TCPPeer extends Peer {
       } else {
         _socket = rawSocket;
       }
+      // Read-stream errors and sink-completion errors are separate. A remote
+      // reset during a write must dispose this peer, not escape the BT isolate.
+      _watchSink(_socket!);
       return _socket;
     } on Exception catch (e) {
       throw TCPConnectException(e);
@@ -2112,7 +2133,9 @@ class _TCPPeer extends Peer {
   }
 
   @override
-  Future dispose([reason]) async {
+  Future dispose([reason]) => _closingTcp ??= _disposeTcp(reason);
+
+  Future<void> _disposeTcp(dynamic reason) async {
     try {
       await _socket?.close();
       _socket?.destroy();
@@ -2120,7 +2143,7 @@ class _TCPPeer extends Peer {
     } catch (e) {
       // do nothing
     } finally {
-      super.dispose(reason);
+      await super.dispose(reason);
     }
   }
 }

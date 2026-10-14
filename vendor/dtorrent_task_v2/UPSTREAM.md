@@ -27,6 +27,10 @@ Local changes:
 - Identify peers by IP, port and transport; peers sharing a NAT address previously disappeared from active scheduling and could not receive reassigned blocks.
 - Hedge only stalled blocks of the currently requested playback pieces to one additional peer; cancel the slower copy and accept legitimate late responses after cancellation (BEP 6).
 - Limit streaming peer connection attempts to eight seconds rather than holding unreachable endpoints for thirty seconds.
+- Keep the next two MiB of playback urgent, cancel requests outside a new seek window, and wake idle peers when blocks are rejected or a peer disconnects. Streaming always consults the current piece priorities instead of following stale piece hints.
+- Avoid scanning a full peer pipeline and index urgent request copies once per hedge attempt; cap each waiting block at two copies and maintain at least eight TCP requests in flight for streaming.
+- Handle aborted incoming TCP handshakes on the listening socket without terminating the shared BT worker isolate.
+- Consume TCP sink completion errors and deduplicate peer disposal so a write-side reset cannot escape the BT worker or race file/socket cleanup.
 
 The application uses its own loopback HTTP Range server, cancellation and task
 persistence. It does not use the upstream single-reader streaming interface.

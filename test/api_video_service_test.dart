@@ -54,6 +54,30 @@ Map<String, dynamic> document(List<Map<String, dynamic>> rows) => {
 
 void main() {
   test(
+    'a slow spelling cannot delay an exact translated title, and loser queries are cancelled',
+    () async {
+      final tokens = <CancelToken>[];
+      final service = ApiVideoService(
+        providerPreferenceWait: Duration.zero,
+        aliasHedgeDelay: const Duration(milliseconds: 10),
+        transport: (uri, token) async {
+          if (uri.queryParameters['wd'] == '另一译名') {
+            tokens.add(token!);
+            return Completer<Object?>().future;
+          }
+          return document([row(name: '测试动画')]);
+        },
+      );
+      final catalog = await service
+          .loadCatalog(subject(name: '测试动画', chinese: '另一译名'))
+          .timeout(const Duration(milliseconds: 250));
+      expect(catalog.title, '测试动画');
+      await Future<void>.delayed(Duration.zero);
+      expect(tokens, hasLength(3));
+      expect(tokens.every((token) => token.isCancelled), isTrue);
+    },
+  );
+  test(
     'a ready backup starts before a stalled preferred API times out',
     () async {
       final transport = _ControlledMetadata();
