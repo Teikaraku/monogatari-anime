@@ -36,6 +36,11 @@ mixin CongestionControl on EventsEmittable<PeerEvent> {
 
   int _allowWindowSize = defaultRequestLength;
 
+  /// Playback must not reserve a needed block on a silent peer indefinitely.
+  /// Normal downloads retain the original adaptive retry budget.
+  Duration? requestDeadline;
+  int minimumRequestWindow = 1;
+
   final List<List<dynamic>> _downloadedHistory = <List<dynamic>>[];
 
   /// Initialize congestion window for uTP peers with optimized initial value
@@ -68,21 +73,30 @@ mixin CongestionControl on EventsEmittable<PeerEvent> {
     _timeout?.cancel();
     var requests = currentRequestBuffer;
     if (requests.isEmpty) return;
-    _timeout = Timer(Duration(microseconds: _rto.toInt()), () {
+    final budget =
+        min(_rto.toInt(), requestDeadline?.inMicroseconds ?? _rto.toInt());
+    final age = DateTime.now().microsecondsSinceEpoch - requests.first[3];
+    // Adding another request must not extend the oldest request's deadline.
+    _timeout = Timer(Duration(microseconds: max(0, budget - age)), () {
       if (requests.isEmpty) return;
-      if (times + 1 >= 5) {
-        timeOutErrorHappen();
-        return;
-      }
-
       var now = DateTime.now().microsecondsSinceEpoch;
       var first = requests.first;
       var timeoutR = <List<int>>[];
-      while ((now - first[3]) > _rto) {
+      while ((now - first[3]) >= budget) {
         var request = requests.removeAt(0);
         timeoutR.add(request);
         if (requests.isEmpty) break;
         first = requests.first;
+      }
+      // Timers may wake slightly early; that is not another failed attempt.
+      if (timeoutR.isEmpty) {
+        startRequestDataTimeout(times);
+        return;
+      }
+      if (times + 1 >= 5) {
+        requests.insertAll(0, timeoutR);
+        timeOutErrorHappen();
+        return;
       }
       for (var request in timeoutR) {
         orderResendRequest(request[0], request[1], request[2], request[4]);
@@ -126,7 +140,7 @@ mixin CongestionControl on EventsEmittable<PeerEvent> {
     var c = _allowWindowSize ~/ defaultRequestLength;
     // var cw = 2 + (currentSpeed * 500 / defaultRequestLength).ceil();
     // print('$cw, $c');
-    return c;
+    return max(minimumRequestWindow, c);
   }
 
   void clearCC() {

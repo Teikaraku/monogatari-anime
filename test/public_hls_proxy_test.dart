@@ -37,6 +37,7 @@ void main() {
       );
       final client = HttpClient();
       await relay.start();
+      client.findProxy = (_) => 'PROXY 127.0.0.1:${relay.uri.port}';
       try {
         final manifest = await (await client.getUrl(relay.uri)).close();
         final raw = await manifest.transform(utf8.decoder).join();

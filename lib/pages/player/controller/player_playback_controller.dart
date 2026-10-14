@@ -303,28 +303,44 @@ abstract class _PlayerPlaybackController with Store {
     if (!canInstall()) {
       return null;
     }
-    final hlsRoute = publicNetworkOnly && videoSourceFormat == VideoSourceFormat.hls
-        ? PublicHlsProxy(source: Uri.parse(videoUrl()), headers: httpHeaders,
+    final hlsRoute =
+        publicNetworkOnly && videoSourceFormat == VideoSourceFormat.hls
+        ? PublicHlsProxy(
+            source: Uri.parse(videoUrl()),
+            headers: httpHeaders,
             adBlockerEnabled: adBlockerEnabled,
-            proxyForUri: (uri) => NetworkConfig.fromSettings().proxyForUri(uri))
+            onFailure: (uri, error) => KazumiLogger().w(
+              'PlayerRelay: ${uri.host} request failed',
+              error: error.runtimeType.toString(),
+            ),
+            proxyForUri: (uri) => NetworkConfig.fromSettings().proxyForUri(uri),
+          )
         : null;
-    final route = publicNetworkOnly && hlsRoute == null ? PublicVideoProxy(
-      proxyForUri: (uri) => NetworkConfig.fromSettings().proxyForUri(uri),
-    ) : null;
+    final route = publicNetworkOnly && hlsRoute == null
+        ? PublicVideoProxy(
+            proxyForUri: (uri) => NetworkConfig.fromSettings().proxyForUri(uri),
+          )
+        : null;
     await route?.start();
     await hlsRoute?.start();
-    if (!canInstall()) { await route?.close(); await hlsRoute?.close(); return null; }
+    if (!canInstall()) {
+      await route?.close();
+      await hlsRoute?.close();
+      return null;
+    }
     late final _OwnedPlayer candidate;
     try {
       candidate = _OwnedPlayer(
-      Player(
-        configuration: PlayerConfiguration(
-          bufferSize: cachePolicy.bufferSize,
-          osc: false,
-          logLevel: MPVLogLevel.values[debug.playerLogLevel],
-          adBlocker: adBlockerEnabled,
+        Player(
+          configuration: PlayerConfiguration(
+            bufferSize: cachePolicy.bufferSize,
+            osc: false,
+            logLevel: MPVLogLevel.values[debug.playerLogLevel],
+            adBlocker: adBlockerEnabled,
+          ),
         ),
-      ), route, hlsRoute,
+        route,
+        hlsRoute,
       );
     } catch (_) {
       await route?.close();
@@ -366,6 +382,10 @@ abstract class _PlayerPlaybackController with Store {
       if (isTorrentStream) {
         await pp.setProperty('cache-on-disk', 'no');
         await pp.setProperty('network-timeout', '90');
+        await pp.setProperty(
+          'demuxer-lavf-o',
+          'protocol_whitelist=[http,tcp,httpproxy,crypto]',
+        );
       }
       if (!isCurrentPlayer(player)) {
         return await _discardIfNotCurrent(candidate);
@@ -392,13 +412,25 @@ abstract class _PlayerPlaybackController with Store {
       final proxy = isTorrentStream || isLocalPlayback() || mediaUri == null
           ? null
           : NetworkConfig.fromSettings().proxyForUri(mediaUri);
-      await pp.setProperty('http-proxy', hlsRoute != null ? '' : route?.uri.toString() ?? proxy?.toString() ?? '');
+      await pp.setProperty(
+        'http-proxy',
+        hlsRoute != null
+            ? hlsRoute.uri.origin
+            : isTorrentStream && mediaUri != null
+            ? mediaUri.origin
+            : route?.uri.toString() ?? proxy?.toString() ?? '',
+      );
+      // A blank proxy value still inherits ffmpeg's environment proxy. The
+      // owned local HTTP relay accepts absolute request targets as well, so
+      // using itself explicitly keeps all local media traffic on loopback.
       if (publicNetworkOnly) {
         await pp.setProperty('tls-ca-file', await MediaTrustStore.caFile());
         await pp.setProperty('tls-verify', 'yes');
         await pp.setProperty('network-timeout', '15');
-        await pp.setProperty('demuxer-lavf-o',
-          'seg_max_retry=2,http_multiple=1,http_persistent=1,strict=experimental,allowed_extensions=ALL,hls_ad_filter=${hlsRoute == null && adBlockerEnabled ? 1 : 0},protocol_whitelist=[${hlsRoute != null ? 'http,tcp,crypto' : 'https,tls,tcp,httpproxy,crypto'}]');
+        await pp.setProperty(
+          'demuxer-lavf-o',
+          'seg_max_retry=2,http_multiple=1,http_persistent=1,strict=experimental,allowed_extensions=ALL,hls_ad_filter=${hlsRoute == null && adBlockerEnabled ? 1 : 0},protocol_whitelist=[${hlsRoute != null ? 'http,tcp,httpproxy,crypto' : 'https,tls,tcp,httpproxy,crypto'}]',
+        );
       }
       if (!isCurrentPlayer(player)) {
         return await _discardIfNotCurrent(candidate);

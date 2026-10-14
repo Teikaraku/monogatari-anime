@@ -181,6 +181,9 @@ abstract class TorrentTask with EventsEmittable<TaskEvent> {
 
   /// Monogatari: wake idle peers after the streaming window changes.
   void requestPieces(Peer peer, [int pieceIndex = -1]);
+
+  /// Playback's currently needed pieces, excluding forward buffering.
+  void setStreamingUrgentPieces(Iterable<int> pieces);
   PieceManager? get pieceManager;
 
   /// Pause task
@@ -585,6 +588,9 @@ class _TorrentTask
   final String _savePath;
 
   final Set<String> _peerIds = {};
+  final Map<Peer, Timer> _streamPeerCooldown = {};
+  final Set<int> _streamUrgentPieces = {};
+  Timer? _streamUrgentTimer;
 
   late String
       _peerId; // This is the generated local peer ID, which is different from the ID used in the Peer class.
@@ -768,6 +774,7 @@ class _TorrentTask
     _fileManager ??= await DownloadFileManager.createFileManager(
         model, savePath, _stateFile!, _pieceManager!.pieces.values.toList());
     _peersManager ??= PeersManager(_peerId, model, ipFilter: _ipFilter);
+    if (stream) _peersManager!.connectionTimeoutSeconds = 8;
     _peersManager?.uploadsDisabled = _uploadRateLimit == 0;
     _peersManager?.setSSLConfig(_sslConfig);
     _peersManager?.setProtocolEncryptionConfig(_encryptionConfig);
@@ -1603,6 +1610,7 @@ class _TorrentTask
 
   void _processPeerDispose(PeerDisposeEvent event) {
     if (_pieceManager == null) return;
+    _streamPeerCooldown.remove(event.peer)?.cancel();
 
     // Clean up superseeding tracking for this peer
     if (_superseeder != null) {
@@ -1631,6 +1639,13 @@ class _TorrentTask
 
   void _processReceivePiece(PeerPieceEvent event) {
     if (_pieceManager == null || _peersManager == null) return;
+    if (stream && _streamUrgentPieces.contains(event.index)) {
+      for (final peer in _peersManager!.activePeers) {
+        if (peer != event.peer) {
+          peer.requestCancel(event.index, event.begin, event.block.length);
+        }
+      }
+    }
 
     var piece = _pieceManager![event.index];
     var i = event.index;
@@ -1655,6 +1670,12 @@ class _TorrentTask
 
   void _processPeerHandshake(PeerHandshakeEvent event) {
     if (_fileManager == null) return;
+    if (stream) {
+      event.peer.requestDeadline = const Duration(seconds: 6);
+      // TCP already controls congestion. Keep several block requests in flight
+      // instead of downloading one 16 KiB block per round trip on slower links.
+      if (event.peer.type == PeerType.tcp) event.peer.minimumRequestWindow = 5;
+    }
 
     // In superseeding mode, don't send bitfield (masquerade as peer with no data)
     // Instead, send HAVE for a selected rare piece
@@ -1834,9 +1855,9 @@ class _TorrentTask
     if (_pieceManager == null || _peersManager == null) return;
     var flag = false;
     for (var request in requests) {
-      if (request[4] >= 3) {
+      if (stream || request[4] >= 3) {
         flag = true;
-        Timer.run(() => peer.requestCancel(request[0], request[1], request[2]));
+        peer.requestCancel(request[0], request[1], request[2]);
         var index = request[0];
         var begin = request[1];
         var subindex = begin ~/ defaultRequestLength;
@@ -1846,22 +1867,41 @@ class _TorrentTask
     }
     // Wake up other possibly idle peers.
     if (flag) {
+      var alternatives = 0;
       for (var p in _peersManager!.activePeers) {
-        if (p != peer && p.isSleeping) {
+        if (p != peer && !p.chokeMe && (stream || p.isSleeping)) {
+          alternatives++;
           // TODO: should we request from all peers ?
           Timer.run(() => requestPieces(p));
         }
       }
+      if (stream && alternatives > 0) {
+        // Do not let the silent peer immediately reserve the returned blocks
+        // again while a working peer is trying to take them.
+        _streamPeerCooldown.remove(peer)?.cancel();
+        _streamPeerCooldown[peer] = Timer(const Duration(seconds: 15), () {
+          _streamPeerCooldown.remove(peer);
+          if (!_stopping && !peer.isDisposed) requestPieces(peer);
+        });
+      } else if (stream) {
+        Timer.run(() => requestPieces(peer));
+      }
     }
   }
 
+  @override
   void requestPieces(Peer peer, [int pieceIndex = -1]) async {
     if (_pieceManager == null || _peersManager == null) return;
+    if (_streamPeerCooldown.containsKey(peer) || peer.isDisposed) return;
     _advancedSelector?.setLocalPeerEndpoint(
       _peersManager?.localExternalIP,
       port: _serverSocket?.port ?? 0,
     );
     if (_peersManager!.addPausedRequest(peer, pieceIndex)) return;
+    if (stream && _hedgeUrgentBlock(peer)) {
+      Timer.run(() => requestPieces(peer));
+      return;
+    }
     Piece? piece;
     if (pieceIndex != -1) {
       // a specific piece requested
@@ -1913,8 +1953,55 @@ class _TorrentTask
   }
 
   @override
+  void setStreamingUrgentPieces(Iterable<int> pieces) {
+    _streamUrgentPieces
+      ..clear()
+      ..addAll(pieces);
+    if (_streamUrgentPieces.isEmpty || _stopping) {
+      _streamUrgentTimer?.cancel();
+      _streamUrgentTimer = null;
+      return;
+    }
+    _streamUrgentTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+      if (state != TaskState.running) return;
+      for (final peer in _peersManager?.activePeers ?? <Peer>[]) {
+        if (!peer.chokeMe && !peer.isDisposed) requestPieces(peer);
+      }
+    });
+  }
+
+  bool _hedgeUrgentBlock(Peer peer) {
+    if (_pieceManager == null || _peersManager == null) return false;
+    final peers = _peersManager!.activePeers.toList();
+    final now = DateTime.now().microsecondsSinceEpoch;
+    for (final index in _streamUrgentPieces) {
+      if (_pieceManager![index]?.isCompleted != false ||
+          !peer.remoteCompletePieces.contains(index)) {
+        continue;
+      }
+      for (final other in peers) {
+        if (other == peer) continue;
+        for (final request in other.requestBuffer) {
+          if (request[0] != index || now - request[3] < 1000000) continue;
+          // At most two copies of a waiting urgent block; no whole-file
+          // endgame or redundant forward-buffer downloads.
+          final holders = peers
+              .where((p) => p.requestBuffer.any((r) =>
+                  r[0] == index && r[1] == request[1] && r[2] == request[2]))
+              .toList();
+          if (holders.length != 1 || holders.contains(peer)) continue;
+          return peer.sendRequest(index, request[1], request[2]);
+        }
+      }
+    }
+    return false;
+  }
+
+  @override
   Future stop([bool force = false]) async {
     _stopping = true;
+    _streamUrgentTimer?.cancel();
+    _streamUrgentTimer = null;
     state = TaskState.stopped;
     await _tracker?.stop(force);
     await _streamingServer?.stop();
@@ -1925,6 +2012,8 @@ class _TorrentTask
   @override
   Future<void> dispose() async {
     _stopping = true;
+    _streamUrgentTimer?.cancel();
+    _streamUrgentTimer = null;
     state = TaskState.stopped;
     try {
       await _initializing;
@@ -1963,6 +2052,10 @@ class _TorrentTask
     _lsd?.close();
     _lsd = null;
     _peerIds.clear();
+    for (final timer in _streamPeerCooldown.values) {
+      timer.cancel();
+    }
+    _streamPeerCooldown.clear();
     _comingIp.clear();
     _streamingServer?.stop();
 

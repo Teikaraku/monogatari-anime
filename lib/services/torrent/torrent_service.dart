@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:dio/dio.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:kazumi/services/logging/logger.dart';
 
 import 'dart_torrent_engine.dart';
 import 'torrent_engine.dart';
@@ -17,6 +18,7 @@ class TorrentService {
   final TorrentEngine _engine;
   final Future<Directory> Function() _directoryProvider;
   final Future<bool> Function() _networkAllowed;
+  final Future<HttpServer> Function() _serverBinder;
   final Duration metadataTimeout;
   final int maxActiveTasks;
   final _records = <String, _TorrentRecord>{};
@@ -29,6 +31,10 @@ class TorrentService {
   final _metadataWriters = <String, int>{};
   Directory? _directory;
   HttpServer? _server;
+  Future<bool>? _serverRepair;
+  final _serverKey = base64Url
+      .encode(List.generate(24, (_) => Random.secure().nextInt(256)))
+      .replaceAll('=', '');
   Timer? _timer;
   Future<void>? _initialization;
   Future<void> _saveLane = Future.value();
@@ -48,11 +54,15 @@ class TorrentService {
     TorrentEngine? engine,
     Future<Directory> Function()? directoryProvider,
     Future<bool> Function()? networkAllowed,
+    Future<HttpServer> Function()? serverBinder,
     this.metadataTimeout = const Duration(seconds: 120),
     this.maxActiveTasks = 2,
   }) : _engine = engine ?? DartTorrentEngine(),
        _directoryProvider = directoryProvider ?? _defaultDirectory,
-       _networkAllowed = networkAllowed ?? (() async => true) {
+       _networkAllowed = networkAllowed ?? (() async => true),
+       _serverBinder =
+           serverBinder ??
+           (() => HttpServer.bind(InternetAddress.loopbackIPv4, 0)) {
     if (maxActiveTasks < 1) throw ArgumentError.value(maxActiveTasks);
   }
 
@@ -182,10 +192,7 @@ class TorrentService {
           }
         }
       }
-      _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      _server!.listen(
-        (request) => unawaited(_serve(request).catchError((Object _) {})),
-      );
+      await ensurePlaybackServer();
       _capability = const TorrentCapability(supported: true, ready: true);
       _capabilityController.add(_capability);
       await _save();
@@ -212,6 +219,70 @@ class TorrentService {
     if (!await _networkAllowed()) {
       throw StateError('当前网络不允许 BT 下载，请连接 Wi-Fi 或关闭仅 Wi-Fi 下载设置');
     }
+  }
+
+  /// Returns true when the listener was replaced. Existing leases and BT work
+  /// survive replacement; callers reopen the player with the lease's new URL.
+  Future<bool> ensurePlaybackServer({bool checkConnection = false}) {
+    if (_closed) throw StateError('Torrent service is closed');
+    return _serverRepair ??= _repairPlaybackServer(
+      checkConnection,
+    ).whenComplete(() => _serverRepair = null);
+  }
+
+  Future<bool> _repairPlaybackServer(bool checkConnection) async {
+    final previous = _server;
+    if (previous != null) {
+      if (!checkConnection) return false;
+      final client = HttpClient()..findProxy = (_) => 'DIRECT';
+      try {
+        final request = await client
+            .openUrl(
+              'HEAD',
+              Uri.parse('http://127.0.0.1:${previous.port}/health/$_serverKey'),
+            )
+            .timeout(const Duration(seconds: 1));
+        final response = await request.close().timeout(
+          const Duration(seconds: 1),
+        );
+        if (response.statusCode != HttpStatus.noContent ||
+            response.headers.value('x-monogatari-server') != _serverKey) {
+          throw const HttpException('Local playback listener identity changed');
+        }
+        await response.drain<void>().timeout(const Duration(seconds: 1));
+        if (!_closed && identical(_server, previous)) return false;
+      } catch (_) {
+        await previous.close(force: true);
+      } finally {
+        client.close(force: true);
+      }
+    }
+    if (_closed) throw StateError('Torrent service is closed');
+    // A closed socket can leave a piece read waiting in the BT isolate. Wake
+    // those readers before the native player is stopped, keeping leases and
+    // downloaded pieces alive for reopening on the replacement listener.
+    for (final lease in _leases.values) {
+      for (final token in lease.requests.values) {
+        token.cancel('Local playback listener replaced');
+      }
+    }
+    final server = await _serverBinder();
+    if (_closed) {
+      await server.close(force: true);
+      throw StateError('Torrent service is closed');
+    }
+    _server = server;
+    server.listen(
+      (request) => unawaited(_serve(request).catchError((Object _) {})),
+      onError: (Object error) => KazumiLogger().w(
+        'Torrent: local playback listener error',
+        error: error.runtimeType.toString(),
+      ),
+      onDone: () {
+        if (identical(_server, server)) _server = null;
+      },
+    );
+    return true;
   }
 
   Future<TorrentTaskSnapshot> add(
@@ -639,10 +710,16 @@ class TorrentService {
         clearNotice: true,
       );
       _emit();
+      await ensurePlaybackServer(checkConnection: true);
+      throwIfTorrentCancelled(cancelToken);
+      final leasePort = _server!.port;
       final lease = TorrentPlaybackLease(
         taskId: taskId,
         fileIndex: fileIndex,
-        url: Uri.parse('http://127.0.0.1:${_server!.port}/torrent/$key'),
+        url: Uri.parse('http://127.0.0.1:$leasePort/torrent/$key'),
+        currentUrl: () => Uri.parse(
+          'http://127.0.0.1:${_server?.port ?? leasePort}/torrent/$key',
+        ),
         close: () => _release(key!),
       );
       state.cancellation = cancelToken?.whenCancel.asStream().listen((_) {
@@ -854,6 +931,16 @@ class TorrentService {
 
   Future<void> _serve(HttpRequest request) async {
     final response = request.response;
+    if (request.method == 'HEAD' &&
+        request.uri.path == '/health/$_serverKey' &&
+        request.headers.value('origin') == null &&
+        request.headers.value(HttpHeaders.hostHeader) ==
+            '127.0.0.1:${_server?.port}') {
+      response.statusCode = HttpStatus.noContent;
+      response.headers.set('x-monogatari-server', _serverKey);
+      await response.close();
+      return;
+    }
     final segments = request.uri.pathSegments;
     final lease =
         segments.length == 2 &&
@@ -1200,6 +1287,11 @@ class TorrentService {
     }
     await _drainWork;
     await _refreshWork;
+    try {
+      await _serverRepair;
+    } catch (_) {
+      // Disposal can invalidate a listener that is still being rebound.
+    }
     for (final key in _leases.keys.toList()) {
       await _release(key);
     }

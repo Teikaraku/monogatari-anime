@@ -358,6 +358,37 @@ void main() {
     },
   );
   test(
+    'a lost local endpoint is reopened once with the rebuilt URL before API fallback',
+    () async {
+      var port = 1234;
+      var releases = 0;
+      resolver.playbackLease = TorrentPlaybackLease(
+        url: Uri.parse('http://127.0.0.1:$port/torrent/fixture'),
+        currentUrl: () => Uri.parse('http://127.0.0.1:$port/torrent/fixture'),
+        taskId: 'fixture',
+        fileIndex: 0,
+        close: () async {
+          releases++;
+        },
+      );
+      (resolver.torrents as _Tasks)
+        ..rebindOnCheck = true
+        ..onRebind = () => port = 5678;
+      final player = _FailedRssPlayer(Future.value());
+      controller.applyPlaybackArgs(
+        OnlineVideoPlaybackArgs(bangumiItem: subject, playbackSource: 'rss'),
+      );
+      await controller.initializeOnline();
+      await controller
+          .changeEpisode(1, resumeHistory: false, playerController: player)
+          .timeout(const Duration(seconds: 1));
+      expect(player.openedUrls.map((url) => Uri.parse(url).port), [1234, 5678]);
+      expect(releases, 1);
+      expect(api.candidateLoads, 1);
+      expect(preferences.forSubject(42), 'rss');
+    },
+  );
+  test(
     'explicit unknown release does not silently start another episode',
     () async {
       controller.applyPlaybackArgs(
@@ -516,6 +547,7 @@ class _FailedRssPlayer implements PlayerController {
   _FailedRssPlayer(this.readerReleased);
   final Future<void> readerReleased;
   bool opened = false;
+  final openedUrls = <String>[];
   @override
   final danmaku = _NoopDanmaku();
   @override
@@ -525,6 +557,7 @@ class _FailedRssPlayer implements PlayerController {
   @override
   Future<bool> init(PlaybackInitParams params) async {
     opened = true;
+    openedUrls.add(params.videoUrl);
     return false;
   }
 
@@ -559,6 +592,16 @@ class _NoMediaPlayback implements PlayerPlaybackController {
 
 class _Tasks extends TorrentService {
   List<TorrentTaskSnapshot> saved = [];
+  bool rebindOnCheck = false;
+  void Function()? onRebind;
+  @override
+  Future<bool> ensurePlaybackServer({bool checkConnection = false}) async {
+    if (!rebindOnCheck) return false;
+    rebindOnCheck = false;
+    onRebind?.call();
+    return true;
+  }
+
   @override
   Future<void> initialize() async {}
   @override

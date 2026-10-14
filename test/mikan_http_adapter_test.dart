@@ -24,6 +24,72 @@ void main() {
   tearDown(() => adapter.close(force: true));
 
   test(
+    'configured public API hosts use ECH while other hosts stay on their original transport',
+    () async {
+      final configured = MikanHttpAdapter(
+        fallback: plain,
+        proxyForUri: (_) => null,
+        hosts: const {'bfzyapi.com'},
+        createEchClient: () => encrypted,
+      );
+      addTearDown(() => configured.close(force: true));
+      final response = await configured.fetch(
+        RequestOptions(path: 'https://bfzyapi.com/api.php'),
+        null,
+        null,
+      );
+      await response.stream.drain<void>();
+      final untouched = await configured.fetch(
+        RequestOptions(path: 'https://personal.test/rss?token=private'),
+        null,
+        null,
+      );
+      await untouched.stream.drain<void>();
+      expect(encrypted.requests.single.url.host, 'bfzyapi.com');
+      expect(plain.requests.single.uri.host, 'personal.test');
+    },
+  );
+
+  test('a stalled edge is bypassed without waiting for its timeout', () async {
+    encrypted.waitForAbort = true;
+    final backup = _EncryptedClient();
+    final hedged = MikanHttpAdapter(
+      fallback: plain,
+      proxyForUri: (_) => null,
+      createEchClient: () => encrypted,
+      createSecondaryEchClient: () => backup,
+      hedgeDelay: const Duration(milliseconds: 5),
+    );
+    addTearDown(() => hedged.close(force: true));
+    final response = await hedged
+        .fetch(_options('/RSS/Classic'), null, null)
+        .timeout(const Duration(seconds: 1));
+    expect(response.statusCode, 200);
+    await response.stream.drain<void>();
+    await Future<void>.delayed(Duration.zero);
+    expect(encrypted.aborted, isTrue);
+    expect(backup.requests, hasLength(1));
+    expect(plain.requests, isEmpty);
+  });
+
+  test('a refused encrypted edge cannot win over a working edge', () async {
+    encrypted.status = 403;
+    final backup = _EncryptedClient();
+    final hedged = MikanHttpAdapter(
+      fallback: plain,
+      proxyForUri: (_) => null,
+      createEchClient: () => encrypted,
+      createSecondaryEchClient: () => backup,
+      hedgeDelay: const Duration(milliseconds: 5),
+    );
+    addTearDown(() => hedged.close(force: true));
+    final response = await hedged.fetch(_options('/RSS/Classic'), null, null);
+    expect(response.statusCode, 200);
+    await response.stream.drain<void>();
+    expect(plain.requests, isEmpty);
+  });
+
+  test(
     'Mikan direct RSS and torrent metadata use the encrypted route',
     () async {
       for (final path in [
@@ -170,6 +236,7 @@ class _EncryptedClient extends http.BaseClient {
   bool waitForAbort = false;
   bool aborted = false;
   bool closed = false;
+  int status = 200;
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
@@ -183,7 +250,7 @@ class _EncryptedClient extends http.BaseClient {
     }
     return http.StreamedResponse(
       Stream.value('encrypted HTTPS'.codeUnits),
-      200,
+      status,
     );
   }
 

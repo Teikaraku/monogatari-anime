@@ -14,9 +14,14 @@ void check(bool condition, String message) {
 }
 
 Future<void> main() async {
+  const pieceLength = 1024 * 1024;
   final fixture = TorrentLoopbackFixture(
+    pieceLength: pieceLength,
     data: Uint8List.fromList(
-      List.generate(40 * 16384, (index) => (index * 31 + index ~/ 16384) & 255),
+      List.generate(
+        40 * pieceLength,
+        (index) => (index * 31 + index ~/ pieceLength) & 255,
+      ),
     ),
   );
   final directory = await Directory.systemTemp.createTemp(
@@ -69,7 +74,7 @@ Future<void> main() async {
       'first piece checksum and bytes',
     );
     check(
-      fixture.requests.every((piece) => piece >= 0 && piece <= 3),
+      fixture.requests.every((piece) => piece >= 0 && piece < 16),
       'stream-only requests the current piece and its bounded forward window',
     );
     final tailOffset = fixture.data.length - 4096;
@@ -83,7 +88,7 @@ Future<void> main() async {
       'tail Range seek bytes',
     );
     check(
-      fixture.requests.every((piece) => piece <= 3 || piece == 39),
+      fixture.requests.every((piece) => piece < 16 || piece == 39),
       'seek moves directly to the tail without downloading intervening pieces',
     );
     await handle.removeReader('playback');
@@ -92,7 +97,7 @@ Future<void> main() async {
     final read = handle.read(
       'cancelled',
       0,
-      20 * 16384,
+      20 * pieceLength,
       4096,
       cancelToken: cancelled,
     );
@@ -105,7 +110,7 @@ Future<void> main() async {
       check(CancelToken.isCancel(error), 'read cancellation type');
     }
     await handle.removeReader('cancelled');
-    final removedRead = handle.read('removed', 0, 20 * 16384, 4096);
+    final removedRead = handle.read('removed', 0, 20 * pieceLength, 4096);
     // Attach the expectation before removing a reader, so the RPC error is owned.
     final removedResult = removedRead.then<Object?>(
       (_) => null,

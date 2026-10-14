@@ -23,6 +23,10 @@ Local changes:
 - Encode DHT transaction IDs and info-hashes as bencoded byte strings and decode response kinds from bytes; the original codec mismatch rejected valid public DHT responses.
 - Follow DHT referrals by XOR distance with bounded parallel lookup, per-query expiry and periodic rediscovery; validate reply endpoints and transaction IDs, bound the node table, and cancel discovery timers on stop.
 - Bound HTTP tracker connection/response time and payload size, reject unsuccessful status codes, and preserve original tracker query parameters.
+- For streaming, keep a bounded TCP request pipeline and return silent-peer blocks to other peers after six seconds; adding new requests no longer resets the oldest block's timeout.
+- Identify peers by IP, port and transport; peers sharing a NAT address previously disappeared from active scheduling and could not receive reassigned blocks.
+- Hedge only stalled blocks of the currently requested playback pieces to one additional peer; cancel the slower copy and accept legitimate late responses after cancellation (BEP 6).
+- Limit streaming peer connection attempts to eight seconds rather than holding unreachable endpoints for thirty seconds.
 
 The application uses its own loopback HTTP Range server, cancellation and task
 persistence. It does not use the upstream single-reader streaming interface.

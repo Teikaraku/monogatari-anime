@@ -1,9 +1,11 @@
 import 'dart:io';
+import 'package:dio/dio.dart';
 
 import 'package:dio/io.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/services/network/proxy_utils.dart';
 import 'package:kazumi/services/network/public_dns_resolver.dart';
+import 'package:kazumi/services/network/mikan_http_adapter.dart';
 import 'package:kazumi/services/network/system_proxy_service.dart';
 import 'package:kazumi/services/storage/storage.dart';
 
@@ -39,9 +41,9 @@ class NetworkConfig {
     return null;
   }
 
-  IOHttpClientAdapter createAdapter() {
+  HttpClientAdapter createAdapter() {
     final resolver = PublicDnsResolver(proxyForUri: proxyForUri);
-    return IOHttpClientAdapter(
+    final fallback = IOHttpClientAdapter(
       createHttpClient: () {
         final client = HttpClient();
         // Restrict DNS recovery to known public APIs; personal WebDAV and LAN
@@ -84,6 +86,14 @@ class NetworkConfig {
         }
         return client;
       },
+    );
+    // These public collection APIs also use Cloudflare. A valid-looking but
+    // polluted DNS answer or blocked TLS SNI should not make every source time
+    // out. Personal endpoints and configured proxies keep their own transport.
+    return MikanHttpAdapter(
+      fallback: fallback,
+      proxyForUri: proxyForUri,
+      hosts: const {'api.yzzy-api.com', 'bfzyapi.com', 'cj.lziapi.com'},
     );
   }
 

@@ -47,6 +47,7 @@ class PeersManager with Holepunch, PEX, EventsEmittable<PeerEvent> {
   ];
 
   bool _disposed = false;
+  int connectionTimeoutSeconds = defaultConnectTimeout;
 
   bool get isDisposed => _disposed;
 
@@ -282,7 +283,7 @@ class PeersManager with Holepunch, PEX, EventsEmittable<PeerEvent> {
       ..on<ExtendedEvent>((event) =>
           _processExtendedMessage(peer, event.eventName, event.data));
     _registerExtended(peer);
-    peer.connect();
+    peer.connect(connectionTimeoutSeconds);
   }
 
   ///  Add supported extensions here

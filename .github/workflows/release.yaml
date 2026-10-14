@@ -5,6 +5,12 @@ on:
     branches: ['codex/production-*']
     tags: ['monogatari-v*']
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish the completed GitHub Release'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -160,6 +166,7 @@ jobs:
 
   publish:
     name: Publish complete GitHub release
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true }}
     needs: [android, windows, ios]
     runs-on: ubuntu-latest
     concurrency:

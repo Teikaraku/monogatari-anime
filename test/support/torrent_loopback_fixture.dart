@@ -25,6 +25,9 @@ class TorrentLoopbackFixture {
   late Uint8List torrentBytes;
   late Uint8List infoHash;
   int? advertisedMetadataSize;
+  List<(InternetAddress, int)> extraPeers = [];
+  Duration handshakeDelay = Duration.zero;
+  String peerId = '-MO0001-012345678901';
 
   TorrentLoopbackFixture({
     required this.data,
@@ -87,6 +90,11 @@ class TorrentLoopbackFixture {
               1,
               seeder.port >> 8,
               seeder.port & 255,
+              for (final peer in extraPeers) ...[
+                ...peer.$1.rawAddress,
+                peer.$2 >> 8,
+                peer.$2 & 255,
+              ],
             ]),
           }),
         );
@@ -107,7 +115,7 @@ class TorrentLoopbackFixture {
     var pending = <int>[];
     var handshake = false;
     var metadataId = 1;
-    socket.listen(
+    final subscription = socket.listen(
       (block) {
         pending.addAll(block);
         if (!handshake) {
@@ -127,7 +135,7 @@ class TorrentLoopbackFixture {
             ...ascii.encode('BitTorrent protocol'),
             ...reserved,
             ...infoHash,
-            ...ascii.encode('-MO0001-012345678901'),
+            ...ascii.encode(peerId),
           ]);
           final pieces = (data.length + pieceLength - 1) ~/ pieceLength;
           final bitfield = Uint8List((pieces + 7) ~/ 8);
@@ -230,6 +238,10 @@ class TorrentLoopbackFixture {
         socket.destroy();
       },
     );
+    if (handshakeDelay > Duration.zero) {
+      subscription.pause();
+      Timer(handshakeDelay, subscription.resume);
+    }
   }
 
   List<int> _frame(int id, List<int> data) {

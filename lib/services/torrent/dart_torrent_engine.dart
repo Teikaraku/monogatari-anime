@@ -814,11 +814,29 @@ class _WorkerTask {
       }
     }
     final priority = <int>{};
+    // Container probing can request the header and tail concurrently. Every
+    // reader's current piece outranks another reader's forward buffer.
+    for (final reader in readers.values) {
+      final current =
+          (model.files[reader.$1].offset + reader.$2) ~/ model.pieceLength;
+      priority.add(current);
+    }
+    task.setStreamingUrgentPieces(priority);
     for (final reader in readers.values) {
       final file = model.files[reader.$1];
       final current = (file.offset + reader.$2) ~/ model.pieceLength;
       final end = (file.end - 1) ~/ model.pieceLength;
-      for (var piece = current; piece <= min(current + 3, end); piece++) {
+      // A fixed four-piece window can be only 64 KiB on small-piece torrents.
+      // Bound lookahead by bytes so playback keeps a useful, temporary buffer.
+      final ahead = max(
+        4,
+        (16 * 1024 * 1024 + model.pieceLength - 1) ~/ model.pieceLength,
+      );
+      for (
+        var piece = current;
+        piece < min(current + ahead, end + 1);
+        piece++
+      ) {
         priority.add(piece);
         wanted.add(piece);
       }
@@ -829,6 +847,7 @@ class _WorkerTask {
         if (!wanted.contains(index)) index,
     ]);
     if (paused || wanted.isEmpty) {
+      task.setStreamingUrgentPieces(const []);
       task.pause();
     } else {
       task.resume();

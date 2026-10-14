@@ -344,7 +344,8 @@ class PublicHlsProxy {
           await response.addStream(origin.timeout(const Duration(seconds: 12)));
         }
       }
-    } catch (_) {
+    } catch (error) {
+      onFailure?.call(resource.url, error);
       try {
         response.statusCode = 502;
       } catch (_) {}

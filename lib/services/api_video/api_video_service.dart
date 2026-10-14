@@ -26,10 +26,12 @@ class ApiVideoService {
     ApiVideoTransport? transport,
     this.cacheTtl = const Duration(minutes: 5),
     this.providerTimeout = const Duration(seconds: 15),
+    this.providerPreferenceWait = const Duration(milliseconds: 1200),
     this.maxCachedProviders = 96,
     this.maxResponseBytes = 8 * 1024 * 1024,
     DateTime Function()? clock,
   }) : assert(maxCachedProviders > 0),
+       assert(!providerPreferenceWait.isNegative),
        _dio = dio,
        _transport = transport,
        _clock = clock ?? DateTime.now;
@@ -39,6 +41,9 @@ class ApiVideoService {
   final DateTime Function() _clock;
   final Duration cacheTtl;
   final Duration providerTimeout;
+
+  /// Prefer the configured order briefly, then use an already-ready backup.
+  final Duration providerPreferenceWait;
   final int maxCachedProviders;
   final int maxResponseBytes;
   final Map<String, _CachedTitles> _cache = {};
@@ -73,9 +78,8 @@ class ApiVideoService {
   }) async {
     final preparation = _prepareMetadata(subject, cancelToken);
     final failures = <ApiVideoFailure?>[];
-    for (final load in preparation.loads) {
+    await for (final outcome in _readyOutcomes(preparation)) {
       _checkCancelled(cancelToken);
-      final outcome = await load;
       final titles = outcome.titles;
       failures.add(outcome.failure);
       _checkCancelled(cancelToken);
@@ -96,9 +100,12 @@ class ApiVideoService {
   ) async* {
     final episodes = [...initial.episodes];
     final keys = episodes.map((episode) => episode.key).toSet();
-    for (final load in preparation.loads) {
+    await for (final outcome in _readyOutcomes(
+      preparation,
+      preferOrder: false,
+    )) {
       _checkCancelled(cancelToken);
-      final titles = (await load).titles;
+      final titles = outcome.titles;
       final added = <ApiVideoEpisode>[];
       for (final title in titles) {
         for (final episode in title.catalog.episodes) {
@@ -114,7 +121,7 @@ class ApiVideoService {
   });
 
   /// No work starts until listened to. Metadata is prepared concurrently, but
-  /// candidates are always emitted in provider priority order.
+  /// candidates prefer the configured order without waiting on a stalled API.
   Stream<ApiVideoCandidate> candidatesForEpisode(
     BangumiItem subject,
     ApiVideoEpisode episode, {
@@ -124,9 +131,8 @@ class ApiVideoService {
   ) async* {
     final emitted = <String>{};
     final failures = <ApiVideoFailure?>[];
-    for (final load in preparation.loads) {
+    await for (final outcome in _readyOutcomes(preparation)) {
       _checkCancelled(cancelToken);
-      final outcome = await load;
       final titles = outcome.titles;
       failures.add(outcome.failure);
       for (final title in titles) {
@@ -163,7 +169,47 @@ class ApiVideoService {
       }
       loads.add(_loadProvider(query, provider, scope));
     }
-    return _MetadataPreparation(scope, loads, cancellation);
+    final preferredFlight =
+        _inFlight[query.providerKey(apiVideoProviderPriority.first)];
+    final alreadyWaited = preferredFlight?.elapsed.elapsed ?? Duration.zero;
+    final remainingWait = providerPreferenceWait - alreadyWaited;
+    return _MetadataPreparation(
+      scope,
+      loads,
+      cancellation,
+      preferenceWait: remainingWait.isNegative ? Duration.zero : remainingWait,
+    );
+  }
+
+  Stream<_ProviderOutcome> _readyOutcomes(
+    _MetadataPreparation preparation, {
+    bool preferOrder = true,
+  }) async* {
+    final remaining = List.generate(preparation.loads.length, (index) => index);
+    while (remaining.isNotEmpty) {
+      final wait = preferOrder
+          ? preparation.preferenceWait - preparation.elapsed.elapsed
+          : Duration.zero;
+      final preferred = remaining.first;
+      final index = preparation.outcomes.containsKey(preferred)
+          ? preferred
+          : wait > Duration.zero
+          ? null
+          : remaining.where(preparation.outcomes.containsKey).firstOrNull;
+      if (index != null) {
+        remaining.remove(index);
+        final error = preparation.errors[index];
+        if (error != null) Error.throwWithStackTrace(error.$1, error.$2);
+        yield preparation.outcomes[index]!;
+        continue;
+      }
+      final changed = preparation.changed;
+      if (wait > Duration.zero) {
+        await changed.timeout(wait, onTimeout: () {});
+      } else {
+        await changed;
+      }
+    }
   }
 
   /// An async* finally alone cannot interrupt an await when its subscription
@@ -794,6 +840,7 @@ class _ProviderFlight {
   _ProviderFlight(this.key, this.revision);
   final String key;
   final int revision;
+  final elapsed = Stopwatch()..start();
   final token = CancelToken();
   final result = Completer<_ProviderOutcome>();
   int consumers = 0;
@@ -803,7 +850,24 @@ class _ProviderFlight {
 }
 
 class _MetadataPreparation {
-  _MetadataPreparation(this.token, this.loads, this.cancellation) {
+  _MetadataPreparation(
+    this.token,
+    this.loads,
+    this.cancellation, {
+    required this.preferenceWait,
+  }) {
+    for (var index = 0; index < loads.length; index++) {
+      final position = index;
+      unawaited(
+        loads[index].then<void>(
+          (outcome) => _record(position, outcome),
+          onError: (Object error, StackTrace stack) {
+            errors[position] = (error, stack);
+            _record(position, _ProviderOutcome(const [], _failureFor(error)));
+          },
+        ),
+      );
+    }
     settled = Future.wait(loads).then<void>((_) {});
     // Attach a handler immediately: lower-priority requests may be cancelled
     // before an ordered consumer reaches them. Each request owns a lease until
@@ -815,8 +879,21 @@ class _MetadataPreparation {
 
   final CancelToken token;
   final List<Future<_ProviderOutcome>> loads;
+  final Duration preferenceWait;
+  final elapsed = Stopwatch()..start();
+  final outcomes = <int, _ProviderOutcome>{};
+  final errors = <int, (Object, StackTrace)>{};
+  var _changed = Completer<void>();
+  Future<void> get changed => _changed.future;
   final StreamSubscription<DioException>? cancellation;
   late final Future<void> settled;
+
+  void _record(int index, _ProviderOutcome outcome) {
+    outcomes[index] = outcome;
+    final previous = _changed;
+    _changed = Completer<void>();
+    previous.complete();
+  }
 
   void dispose() {
     unawaited(cancellation?.cancel());

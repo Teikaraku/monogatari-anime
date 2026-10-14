@@ -182,18 +182,23 @@ class TorrentTaskSnapshot {
 }
 
 class TorrentPlaybackLease {
-  final Uri url;
+  final Uri _url;
+  final Uri Function()? _currentUrl;
+  Uri get url => _currentUrl?.call() ?? _url;
   final String taskId;
   final int fileIndex;
   final Future<void> Function() _release;
   Future<void>? _closing;
 
   TorrentPlaybackLease({
-    required this.url,
+    required Uri url,
+    Uri Function()? currentUrl,
     required this.taskId,
     required this.fileIndex,
     required Future<void> Function() close,
-  }) : _release = close;
+  }) : _url = url,
+       _currentUrl = currentUrl,
+       _release = close;
 
   Future<void> close() => _closing ??= _release();
 }

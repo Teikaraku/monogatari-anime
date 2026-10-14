@@ -234,6 +234,7 @@ abstract class Peer
 
   /// The local sends a request buffer. The format is: [index, begin, length].
   final _requestBuffer = <List<int>>[];
+  final _cancelledRequests = <(int, int, int)>{};
 
   /// The remote sends a request buffer. The format is: [index, begin, length].
   final _remoteRequestBuffer = <List<int>>[];
@@ -489,6 +490,7 @@ abstract class Peer
 
     /// Clear the request cache.
     _requestBuffer.clear();
+    _cancelledRequests.clear();
     _remoteRequestBuffer.clear();
 
     /// Reset the fast pieces.
@@ -1236,6 +1238,9 @@ abstract class Peer
       /// Per BEP 6: Receiving a piece without a corresponding request is a protocol violation.
       /// Close the connection to prevent potential attacks or protocol errors.
       if (request == null) {
+        // A response already in transit after cancel is valid (BEP 6), and
+        // should not disconnect a useful peer during a seek or handoff.
+        if (_cancelledRequests.remove((index, begin, blockLength))) continue;
         _log.warning(
             'Received piece ($index, $begin, $blockLength) without corresponding request from $address - closing connection');
         dispose(BadException(
@@ -1532,6 +1537,10 @@ abstract class Peer
   void requestCancel(int index, int begin, int length) {
     var request = removeRequest(index, begin, length);
     if (request != null) {
+      _cancelledRequests.add((index, begin, length));
+      if (_cancelledRequests.length > 256) {
+        _cancelledRequests.remove(_cancelledRequests.first);
+      }
       _sendCancel(index, begin, length);
     }
   }
@@ -1996,12 +2005,14 @@ abstract class Peer
   }
 
   @override
-  int get hashCode => address.address.address.hashCode;
+  int get hashCode => Object.hash(address.address.address, address.port, type);
 
   @override
   bool operator ==(other) {
     if (other is Peer) {
-      return other.address.address.address == address.address.address;
+      return other.address.address.address == address.address.address &&
+          other.address.port == address.port &&
+          other.type == type;
     }
     return false;
   }

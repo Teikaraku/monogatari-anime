@@ -37,6 +37,66 @@ void main() {
   });
 
   test(
+    'rebinds a closed playback port without losing the active torrent lease',
+    () async {
+      await service.dispose();
+      final servers = <HttpServer>[];
+      service = TorrentService(
+        engine: engine,
+        directoryProvider: () async => directory,
+        serverBinder: () async {
+          final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+          servers.add(server);
+          return server;
+        },
+      );
+      final task = await service.add(source);
+      final lease = await service.openStream(task.id, 0);
+      final oldUrl = lease.url;
+      final handle = engine.handles.single;
+      expect(
+        await service.ensurePlaybackServer(checkConnection: true),
+        isFalse,
+      );
+      engine.blockReads = true;
+      final blocked = client
+          .getUrl(lease.url)
+          .then((request) => request.close())
+          .then((response) => response.drain<void>());
+      final cancelled = expectLater(blocked, throwsA(isA<Exception>()));
+      await engine.readStarted.future;
+      await servers.single.close(force: true);
+      await Future<void>.delayed(Duration.zero);
+      expect(await service.ensurePlaybackServer(checkConnection: true), isTrue);
+      await cancelled.timeout(const Duration(seconds: 1));
+      expect(engine.readCancelled, isTrue);
+      engine.blockReads = false;
+      expect(servers, hasLength(2));
+      expect(lease.url.path, oldUrl.path);
+      expect(lease.url.port, servers.last.port);
+      expect(handle.closed, isFalse);
+      final response = await (await client.getUrl(lease.url)).close();
+      expect(response.statusCode, HttpStatus.ok);
+      expect(
+        await response.fold<List<int>>(
+          [],
+          (bytes, block) => bytes..addAll(block),
+        ),
+        engine.data,
+      );
+      expect(engine.handles, hasLength(1));
+      client.findProxy = (_) => 'PROXY 127.0.0.1:${lease.url.port}';
+      final proxied = await (await client.getUrl(lease.url)).close();
+      expect(proxied.statusCode, HttpStatus.ok);
+      expect(
+        await proxied.fold<List<int>>([], (out, bytes) => out..addAll(bytes)),
+        engine.data,
+      );
+      await lease.close();
+    },
+  );
+
+  test(
     'loopback responds with correct head, suffix, seek and 416 ranges',
     () async {
       final task = await service.add(source);
@@ -191,34 +251,37 @@ void main() {
     },
   );
 
-  test('restored download tasks retain identity and automatically continue', () async {
-    final task = await service.add(
-      source,
-      bangumiId: 123,
-      episodeNumber: 2,
-      releaseKey: 'release-2',
-    );
-    await service.startDownload(task.id, fileIndices: [0]);
-    await service.dispose();
-    engine = _Engine();
-    service = TorrentService(
-      engine: engine,
-      directoryProvider: () async => directory,
-    );
-    await service.initialize();
-    final restored = service.tasks.single;
-    expect(restored.id, task.id);
-    expect(restored.state, TorrentTaskState.queued);
-    expect(restored.bangumiId, 123);
-    expect(restored.releaseKey, 'release-2');
-    expect(restored.episodeNumber, 2);
-    for (var i = 0; i < 100 && engine.handles.isEmpty; i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-    }
-    expect(engine.handles, isNotEmpty);
-    await service.clearInactiveCache();
-    expect(service.tasks, hasLength(1));
-  });
+  test(
+    'restored download tasks retain identity and automatically continue',
+    () async {
+      final task = await service.add(
+        source,
+        bangumiId: 123,
+        episodeNumber: 2,
+        releaseKey: 'release-2',
+      );
+      await service.startDownload(task.id, fileIndices: [0]);
+      await service.dispose();
+      engine = _Engine();
+      service = TorrentService(
+        engine: engine,
+        directoryProvider: () async => directory,
+      );
+      await service.initialize();
+      final restored = service.tasks.single;
+      expect(restored.id, task.id);
+      expect(restored.state, TorrentTaskState.queued);
+      expect(restored.bangumiId, 123);
+      expect(restored.releaseKey, 'release-2');
+      expect(restored.episodeNumber, 2);
+      for (var i = 0; i < 100 && engine.handles.isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(engine.handles, isNotEmpty);
+      await service.clearInactiveCache();
+      expect(service.tasks, hasLength(1));
+    },
+  );
 
   test(
     'temporary playback survives another lease and is removed after the last one',

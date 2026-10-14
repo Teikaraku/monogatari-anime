@@ -54,6 +54,32 @@ Map<String, dynamic> document(List<Map<String, dynamic>> rows) => {
 
 void main() {
   test(
+    'a ready backup starts before a stalled preferred API times out',
+    () async {
+      final transport = _ControlledMetadata();
+      final service = ApiVideoService(
+        transport: transport.call,
+        providerPreferenceWait: const Duration(milliseconds: 20),
+      );
+      final item = subject();
+      final pending = service.loadCatalog(item);
+      transport.requests[1].response.complete(
+        document([row(id: 'ready-backup')]),
+      );
+      transport.requests[2].response.complete(document([]));
+      final catalog = await pending.timeout(const Duration(milliseconds: 250));
+      expect(catalog.provider, ApiVideoProvider.baofeng);
+      final candidate = await service
+          .candidatesForEpisode(item, catalog.episodes.first)
+          .first
+          .timeout(const Duration(milliseconds: 250));
+      expect(candidate.provider, ApiVideoProvider.baofeng);
+      expect(transport.requests, hasLength(3));
+      expect(transport.requests.first.token.isCancelled, isFalse);
+      transport.completeAll();
+    },
+  );
+  test(
     'catalog selects 1080zyk4 first and shares prepared metadata with candidates',
     () async {
       final requests = <Uri>[];
