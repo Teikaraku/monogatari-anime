@@ -14,9 +14,18 @@ import 'package:saver_gallery/saver_gallery.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class InfoActionsMenu extends StatefulWidget {
-  const InfoActionsMenu({super.key, required this.bangumiItem});
+  const InfoActionsMenu({
+    super.key,
+    required this.bangumiItem,
+    this.hasNote = false,
+    this.onEditNote,
+    this.onShare,
+  });
 
   final BangumiItem bangumiItem;
+  final bool hasNote;
+  final VoidCallback? onEditNote;
+  final VoidCallback? onShare;
 
   @override
   State<InfoActionsMenu> createState() => _InfoActionsMenuState();
@@ -114,6 +123,13 @@ class _InfoActionsMenuState extends State<InfoActionsMenu> {
           ),
           label: 'RSS 资源',
         ),
+        if (widget.onEditNote != null)
+          KazumiMenuItem(
+            onPressed: widget.onEditNote,
+            label: widget.hasNote ? '编辑备注' : '写备注',
+          ),
+        if (widget.onShare != null)
+          KazumiMenuItem(onPressed: widget.onShare, label: '分享海报'),
         KazumiMenuItem(
           onPressed: _savingCover ? null : _saveCover,
           label: _savingCover ? '保存中…' : '保存封面',

@@ -23,6 +23,7 @@ import 'package:kazumi/pages/download/download_controller.dart';
 import 'package:kazumi/services/shaders/shader_asset_service.dart';
 import 'package:kazumi/services/sync/danmaku_shield_sync_service.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
+import 'package:kazumi/pages/season_preview/season_preview_page.dart';
 import 'package:kazumi/pages/subscriptions/subscriptions_page.dart';
 import 'package:kazumi/services/sync/rss_sync_service.dart';
 import 'package:kazumi/pages/torrent/torrent_tasks_page.dart';
@@ -103,6 +104,10 @@ final indexModule = createModule(
       )
       ..module(tabModule)
       ..module(videoModule)
+      ..route(
+        '/season-preview/',
+        child: (context, state) => const SeasonPreviewPage(),
+      )
       ..route(
         '/subscriptions/',
         child: (context, state) => SubscriptionsPage(

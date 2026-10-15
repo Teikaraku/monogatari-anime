@@ -1,5 +1,6 @@
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:kazumi/bean/dialog/dialog.dart';
+import 'package:kazumi/services/subject/subject_local_store.dart';
 import 'package:kazumi/services/sync/rss_sync_service.dart';
 import 'package:kazumi/pages/collect/collect_controller.dart';
 import 'package:kazumi/pages/download/download_controller.dart';
@@ -46,6 +47,9 @@ final coreModule = createModule(
       ..addSingleton<IDanmakuShieldRepository>(DanmakuShieldRepository.new)
       // Service layer.
       ..addSingleton<ApiVideoService>(() => ApiVideoService())
+      ..addSingleton<SubjectNotes>(SubjectNotes.new)
+      ..addSingleton<EpisodeMarks>(EpisodeMarks.new)
+      ..addSingleton<SubjectPlayerChoices>(SubjectPlayerChoices.new)
       ..addSingleton<PlaybackSourcePreferences>(
         () => PlaybackSourcePreferences(),
       )

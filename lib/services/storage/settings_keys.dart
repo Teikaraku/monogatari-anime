@@ -606,6 +606,35 @@ class SettingsKeys {
     100.0,
     group: SettingGroup.player,
   );
+  // A personal note per show, by Bangumi id.
+  static const subjectNotes = SettingKey<Map<dynamic, dynamic>>(
+    'subjectNotes',
+    <dynamic, dynamic>{},
+    group: SettingGroup.misc,
+  );
+  // Manual marks per show: {bangumiId: {episode: watched}}.
+  static const episodeWatchMarks = SettingKey<Map<dynamic, dynamic>>(
+    'episodeWatchMarks',
+    <dynamic, dynamic>{},
+    group: SettingGroup.misc,
+  );
+  // Speed, danmaku and tracks each show keeps.
+  static const subjectPlayerChoices = SettingKey<Map<dynamic, dynamic>>(
+    'subjectPlayerChoices',
+    <dynamic, dynamic>{},
+    group: SettingGroup.misc,
+  );
+  // 新番速览 cards already decided, by season: {'2026-10': [ids]}.
+  static const seasonPreviewSeen = SettingKey<Map<dynamic, dynamic>>(
+    'seasonPreviewSeen',
+    <dynamic, dynamic>{},
+    group: SettingGroup.misc,
+  );
+  static const meteredPlaybackReminder = SettingKey<bool>(
+    'meteredPlaybackReminder',
+    true,
+    group: SettingGroup.player,
+  );
   static const playerMuted = SettingKey<bool>(
     'playerMuted',
     false,
@@ -731,6 +760,11 @@ class SettingsKeys {
     playerControllerLayerDisappearTime,
     defaultVolume,
     playerMuted,
+    subjectNotes,
+    episodeWatchMarks,
+    subjectPlayerChoices,
+    seasonPreviewSeen,
+    meteredPlaybackReminder,
     desktopPipWindow,
   ];
 

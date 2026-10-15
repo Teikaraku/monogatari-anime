@@ -49,6 +49,7 @@ class _PlayerSettingsPageState extends State<PlayerSettingsPage> {
   late bool rssFallbackToApi;
   late bool rssWifiOnly;
   late int rssUploadLimit;
+  late bool meteredPlaybackReminder;
 
   @override
   void initState() {
@@ -64,6 +65,9 @@ class _PlayerSettingsPageState extends State<PlayerSettingsPage> {
     rssFallbackToApi = GStorage.getSetting<bool>(SettingsKeys.rssFallbackToApi);
     rssWifiOnly = GStorage.getSetting<bool>(SettingsKeys.rssWifiOnly);
     rssUploadLimit = GStorage.getSetting<int>(SettingsKeys.rssUploadLimit);
+    meteredPlaybackReminder = GStorage.getSetting<bool>(
+      SettingsKeys.meteredPlaybackReminder,
+    );
     defaultPlaySpeed = GStorage.getSetting<double>(
       SettingsKeys.defaultPlaySpeed,
     );
@@ -285,6 +289,22 @@ class _PlayerSettingsPageState extends State<PlayerSettingsPage> {
                 ? const Text('iOS 的后台运行受系统限制；磁力资源下载时请保持应用在前台。')
                 : null,
             tiles: [
+              if (Platform.isAndroid || Platform.isIOS)
+                SettingsTile.switchTile(
+                  leading: Icons.signal_cellular_alt_rounded,
+                  title: const Text('移动网络播放提醒'),
+                  initialValue: meteredPlaybackReminder,
+                  onToggle: (value) async {
+                    final enabled = value ?? !meteredPlaybackReminder;
+                    await GStorage.putSetting<bool>(
+                      SettingsKeys.meteredPlaybackReminder,
+                      enabled,
+                    );
+                    if (mounted) {
+                      setState(() => meteredPlaybackReminder = enabled);
+                    }
+                  },
+                ),
               SettingsDropdownTile<String>(
                 leading: Icons.video_library_outlined,
                 title: const Text('首选播放方式'),

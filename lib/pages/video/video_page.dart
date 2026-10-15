@@ -35,6 +35,8 @@ import 'package:kazumi/services/api_video/api_video_models.dart';
 import 'package:kazumi/services/download/background_download_service.dart';
 import 'package:kazumi/services/player/timed_shutdown_service.dart';
 import 'package:kazumi/services/storage/storage.dart';
+import 'package:kazumi/services/network/metered_network_service.dart';
+import 'package:kazumi/bean/dialog/dialog_helper.dart';
 import 'package:kazumi/utils/device.dart';
 
 class VideoPage extends StatefulWidget {
@@ -125,7 +127,8 @@ class _VideoPageState extends State<VideoPage>
     if (videoPageController.isOfflineMode) {
       _initOfflineMode();
     } else {
-      _initOnlineMode();
+      MeteredNetworkService.listenable.addListener(_onNetworkChanged);
+      _startOnline();
     }
 
     _syncChatSubscription = playerController.syncplay.chatStream.listen((
@@ -170,6 +173,77 @@ class _VideoPageState extends State<VideoPage>
         offset: videoPageController.historyOffset,
       );
     });
+  }
+
+  /// Confirmed once per app launch; mobile data can cost money.
+  static bool _meteredPlaybackConfirmed = false;
+
+  void _startOnline() {
+    if (_meteredPlaybackConfirmed ||
+        !MeteredNetworkService.isMetered ||
+        !_remindsOnMetered) {
+      unawaited(_initOnlineMode());
+      return;
+    }
+    // Routes cannot be pushed while the page is still being built.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted || _isExiting) return;
+      if (!await _confirmMeteredPlayback()) {
+        if (mounted) unawaited(Navigator.of(context).maybePop());
+        return;
+      }
+      if (mounted && !_isExiting) await _initOnlineMode();
+    });
+  }
+
+  bool get _remindsOnMetered =>
+      GStorage.getSetting(SettingsKeys.meteredPlaybackReminder);
+
+  Future<bool> _confirmMeteredPlayback() async {
+    final choice = await showDialog<_MeteredChoice>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        icon: const Icon(Icons.signal_cellular_alt_rounded),
+        title: const Text('正在使用移动网络'),
+        content: const Text('继续播放会消耗手机流量。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(_MeteredChoice.cancel),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(_MeteredChoice.never),
+            child: const Text('不再提醒'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(_MeteredChoice.play),
+            child: const Text('继续播放'),
+          ),
+        ],
+      ),
+    );
+    switch (choice) {
+      case _MeteredChoice.play:
+        _meteredPlaybackConfirmed = true;
+        return true;
+      case _MeteredChoice.never:
+        await GStorage.putSetting(SettingsKeys.meteredPlaybackReminder, false);
+        return true;
+      case _MeteredChoice.cancel || null:
+        return false;
+    }
+  }
+
+  // Wi-Fi dropped during playback: say so once, without pausing.
+  void _onNetworkChanged() {
+    if (!mounted ||
+        _isExiting ||
+        !MeteredNetworkService.isMetered ||
+        !_remindsOnMetered) {
+      return;
+    }
+    KazumiDialog.showToast(message: '已切换到移动网络，播放会消耗流量');
   }
 
   Future<void> _initOnlineMode() async {
@@ -234,6 +308,7 @@ class _VideoPageState extends State<VideoPage>
 
   @override
   void dispose() {
+    MeteredNetworkService.listenable.removeListener(_onNetworkChanged);
     try {
       windowManager.removeListener(this);
     } catch (_) {}
@@ -757,3 +832,5 @@ class _VideoPageState extends State<VideoPage>
     },
   );
 }
+
+enum _MeteredChoice { play, never, cancel }

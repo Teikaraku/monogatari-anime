@@ -40,6 +40,8 @@ import 'package:saver_gallery/saver_gallery.dart';
 import 'package:kazumi/services/player/audio_controller.dart';
 import 'package:kazumi/services/player/timed_shutdown_service.dart';
 import 'package:kazumi/utils/device.dart';
+import 'package:kazumi/pages/player/track_selection_sheet.dart';
+import 'package:kazumi/services/subject/subject_local_store.dart';
 import 'package:kazumi/services/platform/player_menu_service.dart';
 
 class PlayerItem extends StatefulWidget {
@@ -375,9 +377,9 @@ class _PlayerItemState extends State<PlayerItem>
       'skip': skipOP,
       'exitfullscreen': () => handleShortcutExitFullscreen(),
       'toggledanmaku': () => handleDanmaku(),
-      'speed1': () => setPlaybackSpeed(1.0),
-      'speed2': () => setPlaybackSpeed(2.0),
-      'speed3': () => setPlaybackSpeed(3.0),
+      'speed1': () => chooseSpeed(1.0),
+      'speed2': () => chooseSpeed(2.0),
+      'speed3': () => chooseSpeed(3.0),
       'speedup': () => handleSpeedChange('up'),
       'speeddown': () => handleSpeedChange('down'),
     };
@@ -598,7 +600,7 @@ class _PlayerItemState extends State<PlayerItem>
     playerController.danmaku.canvasController.clear();
     if (playerController.danmaku.danmakuOn) {
       playerController.danmaku.setDanmakuEnabled(false);
-      GStorage.putSetting(SettingsKeys.danmakuEnabledByDefault, false);
+      playerController.rememberDanmaku(false);
       unawaited(_updateAndroidPIPActions(force: true));
       return;
     }
@@ -608,7 +610,7 @@ class _PlayerItemState extends State<PlayerItem>
       return;
     }
     playerController.danmaku.setDanmakuEnabled(true);
-    GStorage.putSetting(SettingsKeys.danmakuEnabledByDefault, true);
+    playerController.rememberDanmaku(true);
     unawaited(_updateAndroidPIPActions(force: true));
   }
 
@@ -1064,6 +1066,11 @@ class _PlayerItemState extends State<PlayerItem>
     await playerController.setPlaybackSpeed(speed);
   }
 
+  /// A speed the user picked from a menu or key; the show remembers it.
+  Future<void> chooseSpeed(double speed) async {
+    await playerController.chooseSpeed(speed);
+  }
+
   Future<void> handleSpeedChange(String type) async {
     try {
       final currentSpeed = playerController.playback.playerSpeed;
@@ -1071,14 +1078,14 @@ class _PlayerItemState extends State<PlayerItem>
       if (type == "up") {
         if (index < defaultPlaySpeedList.length - 1) {
           index++;
-          setPlaybackSpeed(defaultPlaySpeedList[index]);
+          chooseSpeed(defaultPlaySpeedList[index]);
         } else {
           KazumiDialog.showToast(message: '已达倍速上限');
         }
       } else if (type == "down") {
         if (index > 0) {
           index--;
-          setPlaybackSpeed(defaultPlaySpeedList[index]);
+          chooseSpeed(defaultPlaySpeedList[index]);
         } else {
           KazumiDialog.showToast(message: '已达倍速下限');
         }
@@ -1313,6 +1320,21 @@ class _PlayerItemState extends State<PlayerItem>
     showVideoDetailsSheet(context, playerController: playerController);
   }
 
+  void showTrackSelection() {
+    showTrackSelectionSheet(context, playerController: playerController);
+  }
+
+  /// The show's own danmaku choice, before the player knows the episode.
+  bool? get _rememberedDanmaku {
+    try {
+      return inject<SubjectPlayerChoices>()
+          .choicesFor(videoPageController.bangumiItem.id)
+          .danmaku;
+    } catch (_) {
+      return null;
+    }
+  }
+
   void showSyncPlayPanel() {
     showSyncPlaySheet(
       context,
@@ -1389,7 +1411,8 @@ class _PlayerItemState extends State<PlayerItem>
     webDavEnable = GStorage.getSetting(SettingsKeys.webDavEnable);
     webDavEnableHistory = GStorage.getSetting(SettingsKeys.webDavEnableHistory);
     playerController.danmaku.setDanmakuEnabled(
-      GStorage.getSetting(SettingsKeys.danmakuEnabledByDefault),
+      _rememberedDanmaku ??
+          GStorage.getSetting(SettingsKeys.danmakuEnabledByDefault),
     );
     _border = GStorage.getSetting(SettingsKeys.danmakuBorder);
     _opacity = GStorage.getSetting(SettingsKeys.danmakuOpacity);
@@ -1604,7 +1627,8 @@ class _PlayerItemState extends State<PlayerItem>
                               playerController: playerController,
                               videoPageController: videoPageController,
                               onBackPressed: widget.onBackPressed,
-                              setPlaybackSpeed: setPlaybackSpeed,
+                              setPlaybackSpeed: chooseSpeed,
+                              showTrackSelection: showTrackSelection,
                               showDanmakuSwitch: showDanmakuSwitch,
                               onToggleSidePanel: widget.onToggleSidePanel,
                               handleFullscreen: handleFullscreen,

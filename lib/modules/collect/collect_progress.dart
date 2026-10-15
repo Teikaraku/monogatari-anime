@@ -8,13 +8,21 @@ const _weekdayNames = ['一', '二', '三', '四', '五', '六', '日'];
 /// the latest watch record, the airing progress and the broadcast slot.
 /// Each part may be missing.
 class CollectProgress {
-  const CollectProgress({this.history, this.airing, this.slot});
+  const CollectProgress({
+    this.history,
+    this.airing,
+    this.slot,
+    this.lastWatched,
+  });
 
   final History? history;
   final AiringSummary? airing;
   final BroadcastSlot? slot;
 
-  int? get watchedEpisode => history?.watchedEpisodeNumber;
+  /// 看到第 N 话 including manual marks; falls back to the last record.
+  final int? lastWatched;
+
+  int? get watchedEpisode => lastWatched ?? history?.watchedEpisodeNumber;
 
   num? get latestAired => airing?.latest?.displayNumber;
 

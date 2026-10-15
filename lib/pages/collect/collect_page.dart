@@ -29,13 +29,15 @@ import 'package:kazumi/services/player/history_playback_service.dart';
 import 'package:kazumi/services/plugin/rule_engine_models.dart'
     show RuleCancelToken;
 import 'package:kazumi/services/storage/storage.dart';
+import 'package:kazumi/pages/subject/subject_note_dialog.dart';
+import 'package:kazumi/pages/subject/subject_poster.dart';
+import 'package:kazumi/services/subject/subject_local_store.dart';
+import 'package:kazumi/services/subject/subject_watch.dart';
+import 'package:kazumi/services/sync/watched_episode_service.dart';
 import 'package:kazumi/utils/device.dart';
 
 class CollectPage extends StatefulWidget {
-  const CollectPage({
-    super.key,
-    required this.controller,
-  });
+  const CollectPage({super.key, required this.controller});
 
   final CollectController controller;
 
@@ -55,6 +57,11 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
 
   CollectController get collectController => widget.controller;
   final HistoryController _historyController = inject<HistoryController>();
+  final SubjectNotes _notes = inject<SubjectNotes>();
+  final EpisodeMarks _marks = inject<EpisodeMarks>();
+  late final WatchedEpisodeService _episodeSync = WatchedEpisodeService(
+    collectController,
+  );
   final HistoryPlaybackService _playbackService =
       inject<HistoryPlaybackService>();
   bool get _syncDialogOpen => dialogs.isRunning;
@@ -69,29 +76,29 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
   int _airingRunning = 0;
 
   CollectSyncPlan get _syncPlan => CollectSyncPlan(
-        webDavEnabled: GStorage.getSetting(SettingsKeys.webDavEnable),
-        webDavCollectiblesEnabled:
-            GStorage.getSetting(SettingsKeys.webDavEnableCollect),
-        bangumiEnabled: GStorage.getSetting(SettingsKeys.bangumiSyncEnable),
-      );
+    webDavEnabled: GStorage.getSetting(SettingsKeys.webDavEnable),
+    webDavCollectiblesEnabled: GStorage.getSetting(
+      SettingsKeys.webDavEnableCollect,
+    ),
+    bangumiEnabled: GStorage.getSetting(SettingsKeys.bangumiSyncEnable),
+  );
 
   Future<bool> _syncStep(
     CollectSyncStep step, {
     required ValueChanged<String> onError,
     required void Function(String message, int current, int total) onProgress,
-  }) =>
-      switch (step) {
-        CollectSyncStep.webDav => collectController.syncCollectibles(
-            onError: onError,
-          ),
-        CollectSyncStep.bangumi => collectController.syncCollectiblesBangumi(
-            onError: onError,
-            onProgress: onProgress,
-          ),
-        CollectSyncStep.upload => collectController.uploadCollectiblesToWebDav(
-            onError: onError,
-          ),
-      };
+  }) => switch (step) {
+    CollectSyncStep.webDav => collectController.syncCollectibles(
+      onError: onError,
+    ),
+    CollectSyncStep.bangumi => collectController.syncCollectiblesBangumi(
+      onError: onError,
+      onProgress: onProgress,
+    ),
+    CollectSyncStep.upload => collectController.uploadCollectiblesToWebDav(
+      onError: onError,
+    ),
+  };
 
   @override
   void initState() {
@@ -101,13 +108,16 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
     );
     collectController.loadCollectibles();
     _historyController.init();
-    _syncSettingsSubscription = GStorage.watchSettings(_syncSettings)
-        .listen((_) => mounted ? setState(() {}) : null);
-    AirtimeApi.load().then((airtimes) {
-      if (mounted) setState(() => _airtimes = airtimes);
-    }).catchError((Object e) {
-      KazumiLogger().w('Collect: broadcast times unavailable', error: e);
-    });
+    _syncSettingsSubscription = GStorage.watchSettings(
+      _syncSettings,
+    ).listen((_) => mounted ? setState(() {}) : null);
+    AirtimeApi.load()
+        .then((airtimes) {
+          if (mounted) setState(() => _airtimes = airtimes);
+        })
+        .catchError((Object e) {
+          KazumiLogger().w('Collect: broadcast times unavailable', error: e);
+        });
   }
 
   @override
@@ -137,8 +147,9 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
     try {
       final episodes = await MainEpisodeCache.get(id);
       if (mounted && episodes.isNotEmpty) {
-        setState(() => _airing[id] =
-            AiringSummary.of(episodes, today: DateTime.now()));
+        setState(
+          () => _airing[id] = AiringSummary.of(episodes, today: DateTime.now()),
+        );
       }
     } catch (e) {
       // Retried the next time the page asks for it.
@@ -160,24 +171,62 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
         latest[id] = history;
       }
     }
+    // Only shows with manual marks need their recorded episodes.
+    final marked = <int, Map<int, bool>>{
+      for (final entry in collectController.collectibles)
+        if (_marks.marksFor(entry.bangumiItem.id) case final marks
+            when marks.isNotEmpty)
+          entry.bangumiItem.id: marks,
+    };
+    final recorded = <int, Set<int>>{};
+    if (marked.isNotEmpty) {
+      for (final history in histories) {
+        final id = history.bangumiItem.id;
+        if (!marked.containsKey(id)) continue;
+        final episodes = recorded.putIfAbsent(id, () => <int>{});
+        for (final progress in history.progresses.values) {
+          if (progress.episodeNumber > 0) episodes.add(progress.episodeNumber);
+        }
+      }
+    }
     final progress = <int, CollectProgress>{};
     for (final entry in collectController.collectibles) {
       final id = entry.bangumiItem.id;
       final history = latest[id];
       final airing = _airing[id];
       final slot = _airtimes[id];
-      if (history != null || airing != null || slot != null) {
-        progress[id] =
-            CollectProgress(history: history, airing: airing, slot: slot);
+      final marks = marked[id];
+      final lastWatched = marks == null
+          ? null
+          : SubjectWatch(
+              latest: history,
+              watched: SubjectWatch.watchedWith(recorded[id] ?? {}, marks),
+              marks: marks,
+            ).lastWatched;
+      if (history != null ||
+          airing != null ||
+          slot != null ||
+          lastWatched != null) {
+        progress[id] = CollectProgress(
+          history: history,
+          airing: airing,
+          slot: slot,
+          lastWatched: lastWatched,
+        );
       }
     }
     return progress;
   }
 
-  Future<void> _changeType(BangumiItem item, CollectType type,
-      {bool offerUndo = true}) async {
+  Future<void> _changeType(
+    BangumiItem item,
+    CollectType type, {
+    bool offerUndo = true,
+  }) async {
     if (_syncDialogOpen || _pendingIds.contains(item.id)) return;
-    final previous = CollectType.fromValue(collectController.getCollectType(item));
+    final previous = CollectType.fromValue(
+      collectController.getCollectType(item),
+    );
     setState(() => _pendingIds.add(item.id));
     try {
       await collectController.addCollect(item, type: type.value);
@@ -186,7 +235,9 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
     } finally {
       if (mounted) setState(() => _pendingIds.remove(item.id));
     }
-    final current = CollectType.fromValue(collectController.getCollectType(item));
+    final current = CollectType.fromValue(
+      collectController.getCollectType(item),
+    );
     // Bangumi may have refused, or a dialog may have been cancelled.
     if (!offerUndo || current == previous || !mounted) return;
     final title = item.nameCn.isNotEmpty ? item.nameCn : item.name;
@@ -220,39 +271,62 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
     if (_latestHistory(item) != null) {
       unawaited(_resume(item));
     } else {
-      context.pushNamed('/video/',
-          arguments: OnlineVideoPlaybackArgs(bangumiItem: item));
+      context.pushNamed(
+        '/video/',
+        arguments: OnlineVideoPlaybackArgs(bangumiItem: item),
+      );
     }
   }
 
   void _playEpisode(BangumiItem item, int number) {
     if (_syncDialogOpen) return;
-    context.pushNamed('/video/',
-        arguments: OnlineVideoPlaybackArgs(
-          bangumiItem: item,
-          startEpisodeNumber: number,
-        ));
+    context.pushNamed(
+      '/video/',
+      arguments: OnlineVideoPlaybackArgs(
+        bangumiItem: item,
+        startEpisodeNumber: number,
+      ),
+    );
   }
 
   void _pickEpisode(BangumiItem item) {
     if (_syncDialogOpen) return;
-    final watched = {
-      for (final record in _historyController.histories)
-        if (record.bangumiItem.id == item.id)
-          for (final progress in record.progresses.values)
-            progress.episodeNumber,
-    };
+    final watch = SubjectWatch.of(
+      _historyController.histories,
+      item.id,
+      marks: _marks.marksFor(item.id),
+    );
     showAdaptiveBottomSheet<void>(
       context: context,
       maxHeightFactor: 0.8,
       builder: (_) => EpisodePickerSheet(
         bangumiItem: item,
-        watched: watched,
-        lastWatched: _latestHistory(item)?.watchedEpisodeNumber,
+        watched: watch.watched,
+        lastWatched: watch.lastWatched,
         onPlay: (number) => _playEpisode(item, number),
         onDetails: () => context.pushNamed('/info/', arguments: item),
+        onMark: (episodes, watched) => _markEpisodes(item, episodes, watched),
       ),
     );
+  }
+
+  Future<void> _markEpisodes(
+    BangumiItem item,
+    List<int> episodes,
+    bool watched,
+  ) async {
+    await _marks.mark(item.id, episodes, watched: watched);
+    unawaited(_episodeSync.syncManualMarks(item, episodes, watched: watched));
+  }
+
+  void _editNote(BangumiItem item) {
+    if (_syncDialogOpen) return;
+    unawaited(showSubjectNoteEditor(context, item: item, notes: _notes));
+  }
+
+  void _share(BangumiItem item) {
+    if (_syncDialogOpen) return;
+    unawaited(showSubjectPoster(context, item: item));
   }
 
   Future<void> _resume(BangumiItem item) async {
@@ -271,7 +345,8 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
       switch (result) {
         case HistoryPlaybackReady(:final args):
           task.withContext(
-              (context) => context.pushNamed('/video/', arguments: args));
+            (context) => context.pushNamed('/video/', arguments: args),
+          );
         case HistoryPlaybackUnavailable(:final reason):
           KazumiDialog.showToast(message: reason);
       }
@@ -291,10 +366,12 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
           onSync: _syncStep,
         ),
       );
-      task.withContext((context) => context.pushNamed(switch (destination) {
-            CollectSyncDestination.webDavSettings => '/settings/webdav/',
-            CollectSyncDestination.bangumiSettings => '/settings/bangumi/',
-          }));
+      task.withContext(
+        (context) => context.pushNamed(switch (destination) {
+          CollectSyncDestination.webDavSettings => '/settings/webdav/',
+          CollectSyncDestination.bangumiSettings => '/settings/bangumi/',
+        }),
+      );
     }, errorMessage: '同步未完成，请稍后重试');
   }
 
@@ -315,8 +392,9 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
           if (_syncPlan.canSync)
             IconButton(
               tooltip: '同步收藏',
-              onPressed:
-                  _syncDialogOpen || _pendingIds.isNotEmpty ? null : _sync,
+              onPressed: _syncDialogOpen || _pendingIds.isNotEmpty
+                  ? null
+                  : _sync,
               icon: const Icon(Icons.sync_rounded),
             ),
         ],
@@ -324,34 +402,47 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
       body: SafeArea(
         top: false,
         bottom: false,
-        child: Observer(
-          builder: (context) {
-            final entries = collectController.collectibles.toList();
-            final progress =
-                _progress(_historyController.histories.toList());
-            final watching = [
-              for (final entry in entries)
-                if (entry.type == CollectType.watching.value) entry.bangumiItem,
-            ];
-            if (watching.any((item) => !_airingRequested.contains(item.id))) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) _requestAiring(watching);
-              });
-            }
-            return CollectLibraryView(
-              entries: entries,
-              showRating: GStorage.getSetting(SettingsKeys.showRating),
-              layout: _layout,
-              onLayoutChanged: _changeLayout,
-              progress: progress,
-              canEdit: (item) =>
-                  !_syncDialogOpen && !_pendingIds.contains(item.id),
-              onOpen: (item) => context.pushNamed('/info/', arguments: item),
-              onChangeType: (item, type) => unawaited(_changeType(item, type)),
-              onPlay: _play,
-              onPickEpisode: _pickEpisode,
-            );
-          },
+        // Notes and marks change rarely; one listener rebuilds the list.
+        child: ListenableBuilder(
+          listenable: Listenable.merge([_notes, _marks]),
+          builder: (context, _) => Observer(
+            builder: (context) {
+              final entries = collectController.collectibles.toList();
+              final progress = _progress(_historyController.histories.toList());
+              final watching = [
+                for (final entry in entries)
+                  if (entry.type == CollectType.watching.value)
+                    entry.bangumiItem,
+              ];
+              if (watching.any((item) => !_airingRequested.contains(item.id))) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted) _requestAiring(watching);
+                });
+              }
+              return CollectLibraryView(
+                entries: entries,
+                showRating: GStorage.getSetting(SettingsKeys.showRating),
+                layout: _layout,
+                onLayoutChanged: _changeLayout,
+                progress: progress,
+                canEdit: (item) =>
+                    !_syncDialogOpen && !_pendingIds.contains(item.id),
+                onOpen: (item) => context.pushNamed('/info/', arguments: item),
+                onChangeType: (item, type) =>
+                    unawaited(_changeType(item, type)),
+                onPlay: _play,
+                onPickEpisode: _pickEpisode,
+                notes: {
+                  for (final entry in entries)
+                    entry.bangumiItem.id: ?_notes.noteFor(
+                      entry.bangumiItem.id,
+                    ),
+                },
+                onEditNote: _editNote,
+                onShare: _share,
+              );
+            },
+          ),
         ),
       ),
     );

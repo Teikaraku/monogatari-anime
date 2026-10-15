@@ -5,6 +5,7 @@ import 'package:kazumi/bean/widget/empty_state_widget.dart';
 import 'package:kazumi/bean/card/cast_tile.dart';
 import 'package:kazumi/bean/card/character_card.dart';
 import 'package:kazumi/bean/card/staff_card.dart';
+import 'package:kazumi/pages/collect/episode_picker_sheet.dart';
 import 'package:kazumi/pages/info/info_overview_sections.dart';
 import 'package:skeletonizer/skeletonizer.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
@@ -38,7 +39,21 @@ class InfoTabView extends StatefulWidget {
     required this.relationsQueryTimeout,
     required this.relationsHasLoaded,
     required this.loadRelations,
+    this.watched = const {},
+    this.onPlayEpisode,
+    this.onMark,
+    this.note,
+    this.onEditNote,
   });
+
+  /// Episode numbers (第 N 话) counted as watched.
+  final Set<int> watched;
+  final ValueChanged<int>? onPlayEpisode;
+  final EpisodeMarkCallback? onMark;
+
+  /// The user's own line about the show.
+  final String? note;
+  final VoidCallback? onEditNote;
 
   final TabController tabController;
   final BangumiItem bangumiItem;
@@ -199,6 +214,8 @@ class _InfoTabViewState extends State<InfoTabView> {
     final item = widget.bangumiItem;
     final detail = widget.subjectDetail;
     return [
+      if (widget.note != null)
+        InfoNoteRow(note: widget.note!, onEdit: widget.onEditNote),
       if (widget.episodesFailed ||
           infoHasEpisodeSection(widget.episodes, detail))
         InfoEpisodeSection(
@@ -206,6 +223,9 @@ class _InfoTabViewState extends State<InfoTabView> {
           failed: widget.episodesFailed,
           onRetry: widget.loadEpisodes,
           detail: detail,
+          watched: widget.watched,
+          onPlayEpisode: widget.onPlayEpisode,
+          onMark: widget.onMark,
         ),
       if (item.summary.trim().isNotEmpty) _summarySection,
       if (widget.showRating && infoHasRatingDistribution(item))

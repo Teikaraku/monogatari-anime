@@ -1,7 +1,7 @@
 name: kazumi
 description: "物语 (Monogatari), a cross-platform anime client."
 publish_to: "none"
-version: 2.4.4+20404
+version: 2.4.5+20405
 
 environment:
   sdk: ">=3.10.0 <4.0.0"
@@ -108,6 +108,8 @@ dependencies:
       ref: 803c4a27912091db6f839d48d1b984a0d9f588c7
       path: ./media_kit_video
   macos_secure_bookmarks: ^0.2.1
+  share_plus: ^12.0.2
+  qr: ^4.0.0
 
 dev_dependencies:
   path_provider_platform_interface: ^2.1.2

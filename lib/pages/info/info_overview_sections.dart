@@ -14,6 +14,7 @@ import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/modules/bangumi/bangumi_relation.dart';
 import 'package:kazumi/modules/bangumi/bangumi_subject_detail.dart';
 import 'package:kazumi/modules/bangumi/episode_item.dart';
+import 'package:kazumi/pages/collect/episode_picker_sheet.dart';
 import 'package:kazumi/utils/theme.dart';
 
 /// Background of the inset cards on the detail page: the secondary grouped
@@ -186,6 +187,9 @@ class InfoEpisodeSection extends StatelessWidget {
     required this.failed,
     required this.onRetry,
     required this.detail,
+    this.watched = const {},
+    this.onPlayEpisode,
+    this.onMark,
   });
 
   /// Null while loading.
@@ -193,6 +197,11 @@ class InfoEpisodeSection extends StatelessWidget {
   final bool failed;
   final VoidCallback onRetry;
   final BangumiSubjectDetail? detail;
+
+  /// Episode numbers (第 N 话) counted as watched.
+  final Set<int> watched;
+  final ValueChanged<int>? onPlayEpisode;
+  final EpisodeMarkCallback? onMark;
 
   @override
   Widget build(BuildContext context) {
@@ -210,7 +219,13 @@ class InfoEpisodeSection extends StatelessWidget {
           _ProgressCard(progress: progress, today: today),
           if (progress.episodes.length > 1) ...[
             const SizedBox(height: 12),
-            _EpisodeStrip(progress: progress, today: today),
+            _EpisodeStrip(
+              progress: progress,
+              today: today,
+              watched: watched,
+              onPlayEpisode: onPlayEpisode,
+              onMark: onMark,
+            ),
           ],
         ],
       );
@@ -386,10 +401,19 @@ class _StatusPill extends StatelessWidget {
 }
 
 class _EpisodeStrip extends StatefulWidget {
-  const _EpisodeStrip({required this.progress, required this.today});
+  const _EpisodeStrip({
+    required this.progress,
+    required this.today,
+    required this.watched,
+    this.onPlayEpisode,
+    this.onMark,
+  });
 
   final _EpisodeProgress progress;
   final DateTime today;
+  final Set<int> watched;
+  final ValueChanged<int>? onPlayEpisode;
+  final EpisodeMarkCallback? onMark;
 
   @override
   State<_EpisodeStrip> createState() => _EpisodeStripState();
@@ -428,12 +452,18 @@ class _EpisodeStripState extends State<_EpisodeStrip> {
           itemBuilder: (context, index) {
             final episode = episodes[index];
             final day = episode.airDay;
+            final number = episode.displayNumber;
             return _EpisodeTile(
               episode: episode,
               width: _tileWidth,
               today: widget.today,
               isLatest: identical(episode, widget.progress.latest),
               upcoming: day != null && day.isAfter(widget.today),
+              watched:
+                  number == number.truncateToDouble() &&
+                  widget.watched.contains(number.toInt()),
+              onPlay: widget.onPlayEpisode,
+              onMark: widget.onMark,
             );
           },
         ),
@@ -449,6 +479,9 @@ class _EpisodeTile extends StatelessWidget {
     required this.today,
     required this.isLatest,
     required this.upcoming,
+    this.watched = false,
+    this.onPlay,
+    this.onMark,
   });
 
   final EpisodeInfo episode;
@@ -456,11 +489,23 @@ class _EpisodeTile extends StatelessWidget {
   final DateTime today;
   final bool isLatest;
   final bool upcoming;
+  final bool watched;
+  final ValueChanged<int>? onPlay;
+  final EpisodeMarkCallback? onMark;
+
+  /// The whole number 第 N 话, or null for specials such as 13.5.
+  int? get _number {
+    final number = episode.displayNumber;
+    return number > 0 && number == number.truncateToDouble()
+        ? number.toInt()
+        : null;
+  }
 
   bool get _hasDetails =>
       episode.nameCn.isNotEmpty ||
       episode.name.isNotEmpty ||
-      episode.summary.isNotEmpty;
+      episode.summary.isNotEmpty ||
+      (_number != null && (onPlay != null || onMark != null));
 
   @override
   Widget build(BuildContext context) {
@@ -488,15 +533,26 @@ class _EpisodeTile extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    _episodeNumber(episode.displayNumber),
-                    style: TextStyle(
-                      fontSize: 18,
-                      height: 1.1,
-                      fontWeight: FontWeight.w700,
-                      color: isLatest ? colors.primary : colors.onSurface,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
+                  Row(
+                    children: [
+                      Text(
+                        _episodeNumber(episode.displayNumber),
+                        style: TextStyle(
+                          fontSize: 18,
+                          height: 1.1,
+                          fontWeight: FontWeight.w700,
+                          color: isLatest ? colors.primary : colors.onSurface,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                      const Spacer(),
+                      if (watched)
+                        Icon(
+                          Icons.check_circle_rounded,
+                          size: 16,
+                          color: palette.secondaryLabel,
+                        ),
+                    ],
                   ),
                   const SizedBox(height: 4),
                   Expanded(
@@ -589,6 +645,14 @@ class _EpisodeTile extends StatelessWidget {
                 ),
               ),
             ),
+            if (_number != null && (onPlay != null || onMark != null))
+              _EpisodeSheetActions(
+                number: _number!,
+                watched: watched,
+                canPlay: !upcoming,
+                onPlay: onPlay,
+                onMark: onMark,
+              ),
           ],
         );
       },
@@ -1216,6 +1280,104 @@ class _FactLink extends StatelessWidget {
           ),
         ]),
         style: TextStyle(fontSize: 14, height: 1.45, color: colors.primary),
+      ),
+    );
+  }
+}
+
+/// 播放这一集 and 标记为看过 at the foot of an episode's sheet.
+class _EpisodeSheetActions extends StatelessWidget {
+  const _EpisodeSheetActions({
+    required this.number,
+    required this.watched,
+    required this.canPlay,
+    this.onPlay,
+    this.onMark,
+  });
+
+  final int number;
+  final bool watched;
+  final bool canPlay;
+  final ValueChanged<int>? onPlay;
+  final EpisodeMarkCallback? onMark;
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.paddingOf(context).bottom;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(20, 4, 20, 16 + bottom),
+      child: Row(
+        children: [
+          if (onMark != null)
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () {
+                  Navigator.of(context).pop();
+                  onMark!([number], !watched);
+                },
+                icon: Icon(
+                  watched
+                      ? Icons.remove_done_rounded
+                      : Icons.check_circle_outline_rounded,
+                ),
+                label: Text(watched ? '标记为没看过' : '标记为看过'),
+              ),
+            ),
+          if (onMark != null && onPlay != null) const SizedBox(width: 12),
+          if (onPlay != null)
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: canPlay
+                    ? () {
+                        Navigator.of(context).pop();
+                        onPlay!(number);
+                      }
+                    : null,
+                icon: const Icon(Icons.play_arrow_rounded),
+                label: const Text('播放这一集'),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The user's note on the show, tapped to edit.
+class InfoNoteRow extends StatelessWidget {
+  const InfoNoteRow({super.key, required this.note, this.onEdit});
+
+  final String note;
+  final VoidCallback? onEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Material(
+      color: infoCardColor(context),
+      borderRadius: BorderRadius.circular(14),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onEdit,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          child: Row(
+            children: [
+              Icon(Icons.edit_note_rounded, size: 20, color: colors.primary),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  note,
+                  style: TextStyle(
+                    fontSize: 15,
+                    height: 1.4,
+                    color: colors.onSurface,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

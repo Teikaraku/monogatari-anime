@@ -8,25 +8,34 @@ import 'package:kazumi/modules/bangumi/episode_item.dart';
 import 'package:kazumi/request/apis/main_episode_cache.dart';
 import 'package:kazumi/utils/theme.dart';
 
+/// Marks episodes (第 N 话) as watched or not by hand.
+typedef EpisodeMarkCallback =
+    Future<void> Function(List<int> episodes, bool watched);
+
 /// 选集播放: the main episodes of a show from Bangumi. Picking one plays it
-/// from its start; watched episodes and the last one played are marked.
+/// from its start; watched episodes and the last one played are marked. A
+/// long press (or secondary click) marks episodes by hand.
 class EpisodePickerSheet extends StatefulWidget {
   const EpisodePickerSheet({
     super.key,
     required this.bangumiItem,
     required this.watched,
     required this.onPlay,
-    required this.onDetails,
+    this.onDetails,
+    this.onMark,
     this.lastWatched,
   });
 
   final BangumiItem bangumiItem;
 
-  /// Episode numbers (第 N 话) with a watch record.
+  /// Episode numbers (第 N 话) counted as watched.
   final Set<int> watched;
   final int? lastWatched;
   final ValueChanged<int> onPlay;
-  final VoidCallback onDetails;
+
+  /// Shows 条目详情 when given.
+  final VoidCallback? onDetails;
+  final EpisodeMarkCallback? onMark;
 
   @override
   State<EpisodePickerSheet> createState() => _EpisodePickerSheetState();
@@ -42,6 +51,9 @@ class _EpisodePickerSheetState extends State<EpisodePickerSheet> {
       MainEpisodeCache.get(widget.bangumiItem.id);
   ScrollController? _scroll;
 
+  /// Updated at once when marking; the store writes in the background.
+  late final Set<int> _watched = {...widget.watched};
+
   @override
   void dispose() {
     _scroll?.dispose();
@@ -55,6 +67,45 @@ class _EpisodePickerSheetState extends State<EpisodePickerSheet> {
   void _pick(int number) {
     Navigator.of(context).pop();
     widget.onPlay(number);
+  }
+
+  Future<void> _showMarkMenu(int number, Offset position) async {
+    final onMark = widget.onMark;
+    if (onMark == null) return;
+    final watched = _watched.contains(number);
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox;
+    final action = await showMenu<_MarkAction>(
+      context: context,
+      position: RelativeRect.fromRect(
+        position & const Size(1, 1),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        PopupMenuItem(
+          value: watched ? _MarkAction.unwatched : _MarkAction.watched,
+          child: Text(watched ? '标记为没看过' : '标记为看过'),
+        ),
+        if (number > 1)
+          PopupMenuItem(
+            value: _MarkAction.upTo,
+            child: Text('第 1–$number 话标记为看过'),
+          ),
+      ],
+    );
+    if (action == null || !mounted) return;
+    final episodes = action == _MarkAction.upTo
+        ? [for (var i = 1; i <= number; i++) i]
+        : [number];
+    final markWatched = action != _MarkAction.unwatched;
+    setState(() {
+      if (markWatched) {
+        _watched.addAll(episodes);
+      } else {
+        _watched.removeAll(episodes);
+      }
+    });
+    await onMark(episodes, markWatched);
   }
 
   @override
@@ -101,19 +152,22 @@ class _EpisodePickerSheetState extends State<EpisodePickerSheet> {
             },
           ),
         ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-          child: Align(
-            alignment: AlignmentDirectional.centerEnd,
-            child: TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                widget.onDetails();
-              },
-              child: const Text('条目详情'),
+        if (widget.onDetails != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+            child: Align(
+              alignment: AlignmentDirectional.centerEnd,
+              child: TextButton(
+                onPressed: () {
+                  Navigator.of(context).pop();
+                  widget.onDetails!();
+                },
+                child: const Text('条目详情'),
+              ),
             ),
-          ),
-        ),
+          )
+        else
+          SizedBox(height: 8 + MediaQuery.paddingOf(context).bottom),
       ],
     );
   }
@@ -152,15 +206,20 @@ class _EpisodePickerSheetState extends State<EpisodePickerSheet> {
           return _EpisodeCell(
             number: number,
             current: number == widget.lastWatched,
-            watched: widget.watched.contains(number),
+            watched: _watched.contains(number),
             aired: airDay == null || !airDay.isAfter(day),
             onTap: () => _pick(number),
+            onMark: widget.onMark == null
+                ? null
+                : (position) => _showMarkMenu(number, position),
           );
         },
       );
     });
   }
 }
+
+enum _MarkAction { watched, unwatched, upTo }
 
 class _EpisodeCell extends StatelessWidget {
   const _EpisodeCell({
@@ -169,6 +228,7 @@ class _EpisodeCell extends StatelessWidget {
     required this.watched,
     required this.aired,
     required this.onTap,
+    this.onMark,
   });
 
   final int number;
@@ -180,6 +240,9 @@ class _EpisodeCell extends StatelessWidget {
   /// Not yet broadcast episodes cannot be picked.
   final bool aired;
   final VoidCallback onTap;
+
+  /// Opens the mark menu at a global position.
+  final ValueChanged<Offset>? onMark;
 
   @override
   Widget build(BuildContext context) {
@@ -218,6 +281,15 @@ class _EpisodeCell extends StatelessWidget {
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: aired ? onTap : null,
+          onLongPress: onMark == null
+              ? null
+              : () {
+                  final box = context.findRenderObject() as RenderBox;
+                  onMark!(box.localToGlobal(box.size.center(Offset.zero)));
+                },
+          onSecondaryTapUp: onMark == null
+              ? null
+              : (details) => onMark!(details.globalPosition),
           child: Center(
             child: Text(
               number < 10 ? '0$number' : '$number',

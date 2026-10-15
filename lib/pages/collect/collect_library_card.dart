@@ -12,7 +12,12 @@ class _CollectPosterCard extends StatelessWidget {
     this.onPlay,
     this.playLabel = '开始观看',
     this.onPickEpisode,
+    this.hasNote = false,
+    this.onEditNote,
+    this.onShare,
   });
+
+  final bool hasNote;
 
   final CollectedBangumi entry;
   final bool showRating;
@@ -23,6 +28,8 @@ class _CollectPosterCard extends StatelessWidget {
   final VoidCallback? onPlay;
   final String playLabel;
   final VoidCallback? onPickEpisode;
+  final VoidCallback? onEditNote;
+  final VoidCallback? onShare;
 
   /// One short progress phrase for the narrow poster footer.
   String? get _shortProgress {
@@ -43,32 +50,55 @@ class _CollectPosterCard extends StatelessWidget {
       (scaler.scale(12) * 1.4).ceilToDouble();
   static double _statusHeight(TextScaler scaler) =>
       (scaler.scale(11) * 1.4).ceilToDouble();
-  static bool _stackCompactActions(double width, TextScaler scaler,
-          {required bool showRating, required bool showStatus}) =>
+  static bool _stackCompactActions(
+    double width,
+    TextScaler scaler, {
+    required bool showRating,
+    required bool showStatus,
+  }) =>
       (showRating && scaler.scale(12) * 2.5 > width - 56) ||
       (showStatus && scaler.scale(11) * 2 > width - 56);
-  static double _compactActionsHeight(double width, TextScaler scaler,
-      {required bool showRating, required bool showStatus}) {
-    final detailsHeight = (showRating ? _detailsHeight(scaler) : 0.0) +
+  static double _compactActionsHeight(
+    double width,
+    TextScaler scaler, {
+    required bool showRating,
+    required bool showStatus,
+  }) {
+    final detailsHeight =
+        (showRating ? _detailsHeight(scaler) : 0.0) +
         (showStatus ? _statusHeight(scaler) : 0.0) +
         (showRating && showStatus ? 2.0 : 0.0);
-    return _stackCompactActions(width, scaler,
-            showRating: showRating, showStatus: showStatus)
+    return _stackCompactActions(
+          width,
+          scaler,
+          showRating: showRating,
+          showStatus: showStatus,
+        )
         ? detailsHeight + 48
         : detailsHeight.clamp(48.0, double.infinity);
   }
 
-  static double extent(double width, TextScaler scaler,
-      {required bool showRating, required bool showStatus}) {
+  static double extent(
+    double width,
+    TextScaler scaler, {
+    required bool showRating,
+    required bool showStatus,
+  }) {
     final footerHeight = _isCompact(width)
         ? 12 +
-            _titleHeight(scaler, compact: true) +
-            _compactActionsHeight(width, scaler,
-                showRating: showRating, showStatus: showStatus)
+              _titleHeight(scaler, compact: true) +
+              _compactActionsHeight(
+                width,
+                scaler,
+                showRating: showRating,
+                showStatus: showStatus,
+              )
         : 16 +
-            (_titleHeight(scaler) +
-                    (showRating || showStatus ? 4 + _detailsHeight(scaler) : 0))
-                .clamp(48.0, double.infinity);
+              (_titleHeight(scaler) +
+                      (showRating || showStatus
+                          ? 4 + _detailsHeight(scaler)
+                          : 0))
+                  .clamp(48.0, double.infinity);
     return width / _coverRatio + footerHeight;
   }
 
@@ -87,173 +117,199 @@ class _CollectPosterCard extends StatelessWidget {
     final hasUpdate = progress?.hasUpdate ?? false;
 
     Widget detailLine(String value, {bool status = false}) => SizedBox(
-          height: status ? _statusHeight(scaler) : _detailsHeight(scaler),
-          child: Text(
-            value,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.bodySmall?.copyWith(
-              fontSize: status ? 11 : 12,
-              height: 1.4,
-              color: colors.onSurfaceVariant,
+      height: status ? _statusHeight(scaler) : _detailsHeight(scaler),
+      child: Text(
+        value,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: theme.textTheme.bodySmall?.copyWith(
+          fontSize: status ? 11 : 12,
+          height: 1.4,
+          color: colors.onSurfaceVariant,
+        ),
+      ),
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = _isCompact(constraints.maxWidth);
+        final titleBlock = ExcludeSemantics(
+          child: SizedBox(
+            height: _titleHeight(scaler, compact: compact),
+            child: Text(
+              title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontSize: compact ? 13 : 14,
+                height: 1.35,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
         );
-
-    return LayoutBuilder(builder: (context, constraints) {
-      final compact = _isCompact(constraints.maxWidth);
-      final titleBlock = ExcludeSemantics(
-        child: SizedBox(
-          height: _titleHeight(scaler, compact: compact),
-          child: Text(
-            title,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              fontSize: compact ? 13 : 14,
-              height: 1.35,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ),
-      );
-      final detailsBlock = ExcludeSemantics(
-        child: compact
-            ? Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (showRating)
-                    detailLine(shortProgress ??
-                        (hasRating ? item.ratingScore.toStringAsFixed(1) : '')),
-                  if (showStatus) ...[
-                    if (showRating) const SizedBox(height: 2),
-                    detailLine(type.label, status: true),
+        final detailsBlock = ExcludeSemantics(
+          child: compact
+              ? Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (showRating)
+                      detailLine(
+                        shortProgress ??
+                            (hasRating
+                                ? item.ratingScore.toStringAsFixed(1)
+                                : ''),
+                      ),
+                    if (showStatus) ...[
+                      if (showRating) const SizedBox(height: 2),
+                      detailLine(type.label, status: true),
+                    ],
                   ],
-                ],
+                )
+              : detailLine(
+                  [
+                    if (shortProgress != null)
+                      shortProgress
+                    else if (hasRating)
+                      '${item.ratingScore.toStringAsFixed(1)} 分',
+                    if (showStatus) type.label,
+                  ].join(' · '),
+                ),
+        );
+        final menu = _CollectEntryMenu(
+          entry: entry,
+          onChanged: onChangeType,
+          onPlay: onPlay,
+          playLabel: playLabel,
+          onPickEpisode: onPickEpisode,
+          hasNote: hasNote,
+          onEditNote: onEditNote,
+          onShare: onShare,
+        );
+        final footer = compact
+            ? Padding(
+                padding: const EdgeInsets.only(top: 8, bottom: 4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 2),
+                      child: titleBlock,
+                    ),
+                    SizedBox(
+                      height: _compactActionsHeight(
+                        constraints.maxWidth,
+                        scaler,
+                        showRating: showRating,
+                        showStatus: showStatus,
+                      ),
+                      child:
+                          _stackCompactActions(
+                            constraints.maxWidth,
+                            scaler,
+                            showRating: showRating,
+                            showStatus: showStatus,
+                          )
+                          ? Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 2,
+                                  ),
+                                  child: detailsBlock,
+                                ),
+                                Align(
+                                  alignment: AlignmentDirectional.centerEnd,
+                                  child: menu,
+                                ),
+                              ],
+                            )
+                          : Padding(
+                              padding: const EdgeInsetsDirectional.only(
+                                start: 2,
+                              ),
+                              child: Row(
+                                children: [
+                                  Expanded(child: detailsBlock),
+                                  menu,
+                                ],
+                              ),
+                            ),
+                    ),
+                  ],
+                ),
               )
-            : detailLine([
-                if (shortProgress != null)
-                  shortProgress
-                else if (hasRating)
-                  '${item.ratingScore.toStringAsFixed(1)} 分',
-                if (showStatus) type.label,
-              ].join(' · ')),
-      );
-      final menu = _CollectEntryMenu(
-        entry: entry,
-        onChanged: onChangeType,
-        onPlay: onPlay,
-        playLabel: playLabel,
-        onPickEpisode: onPickEpisode,
-      );
-      final footer = compact
-          ? Padding(
-              padding: const EdgeInsets.only(top: 8, bottom: 4),
+            : Padding(
+                padding: const EdgeInsetsDirectional.fromSTEB(2, 7, 0, 4),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          titleBlock,
+                          if (showDetails) ...[
+                            const SizedBox(height: 4),
+                            detailsBlock,
+                          ],
+                        ],
+                      ),
+                    ),
+                    menu,
+                  ],
+                ),
+              );
+
+        return Material(
+          type: MaterialType.transparency,
+          borderRadius: BorderRadius.circular(10),
+          clipBehavior: Clip.antiAlias,
+          child: Semantics(
+            button: true,
+            label: [
+              title,
+              type.label,
+              if (hasUpdate) '有更新',
+              ?shortProgress,
+              if (year != null) '$year 年',
+              if (hasRating) '${item.ratingScore.toStringAsFixed(1)} 分',
+            ].join('，'),
+            child: InkWell(
+              onTap: onOpen,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 2),
-                    child: titleBlock,
-                  ),
-                  SizedBox(
-                    height: _compactActionsHeight(constraints.maxWidth, scaler,
-                        showRating: showRating, showStatus: showStatus),
-                    child: _stackCompactActions(constraints.maxWidth, scaler,
-                            showRating: showRating, showStatus: showStatus)
-                        ? Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              Padding(
-                                padding:
-                                    const EdgeInsets.symmetric(horizontal: 2),
-                                child: detailsBlock,
-                              ),
-                              Align(
-                                alignment: AlignmentDirectional.centerEnd,
-                                child: menu,
-                              ),
-                            ],
-                          )
-                        : Padding(
-                            padding: const EdgeInsetsDirectional.only(start: 2),
-                            child: Row(
-                              children: [Expanded(child: detailsBlock), menu],
+                  ExcludeSemantics(
+                    child: AspectRatio(
+                      aspectRatio: _coverRatio,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          _CollectCover(
+                            item: item,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          if (hasUpdate)
+                            const PositionedDirectional(
+                              top: 6,
+                              start: 6,
+                              child: _UpdateBadge(onCover: true),
                             ),
-                          ),
-                  ),
-                ],
-              ),
-            )
-          : Padding(
-              padding: const EdgeInsetsDirectional.fromSTEB(2, 7, 0, 4),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        titleBlock,
-                        if (showDetails) ...[
-                          const SizedBox(height: 4),
-                          detailsBlock,
                         ],
-                      ],
+                      ),
                     ),
                   ),
-                  menu,
+                  Expanded(child: footer),
                 ],
               ),
-            );
-
-      return Material(
-        type: MaterialType.transparency,
-        borderRadius: BorderRadius.circular(10),
-        clipBehavior: Clip.antiAlias,
-        child: Semantics(
-          button: true,
-          label: [
-            title,
-            type.label,
-            if (hasUpdate) '有更新',
-            ?shortProgress,
-            if (year != null) '$year 年',
-            if (hasRating) '${item.ratingScore.toStringAsFixed(1)} 分',
-          ].join('，'),
-          child: InkWell(
-            onTap: onOpen,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                ExcludeSemantics(
-                  child: AspectRatio(
-                    aspectRatio: _coverRatio,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        _CollectCover(
-                          item: item,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        if (hasUpdate)
-                          const PositionedDirectional(
-                            top: 6,
-                            start: 6,
-                            child: _UpdateBadge(onCover: true),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-                Expanded(child: footer),
-              ],
             ),
           ),
-        ),
-      );
-    });
+        );
+      },
+    );
   }
 }
 
@@ -269,7 +325,13 @@ class _CollectListTile extends StatelessWidget {
     this.onPlay,
     this.playLabel = '开始观看',
     this.onPickEpisode,
+    this.note,
+    this.onEditNote,
+    this.onShare,
   });
+
+  /// The user's own line about the show, shown under the metadata.
+  final String? note;
 
   final CollectedBangumi entry;
   final bool showRating;
@@ -282,6 +344,8 @@ class _CollectListTile extends StatelessWidget {
   final VoidCallback? onPlay;
   final String playLabel;
   final VoidCallback? onPickEpisode;
+  final VoidCallback? onEditNote;
+  final VoidCallback? onShare;
 
   @override
   Widget build(BuildContext context) {
@@ -362,10 +426,10 @@ class _CollectListTile extends StatelessWidget {
                                       overflow: TextOverflow.ellipsis,
                                       style: theme.textTheme.titleMedium
                                           ?.copyWith(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.w600,
-                                        height: 1.35,
-                                      ),
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w600,
+                                            height: 1.35,
+                                          ),
                                     ),
                                   ),
                                 ),
@@ -374,6 +438,9 @@ class _CollectListTile extends StatelessWidget {
                             _CollectEntryMenu(
                               entry: entry,
                               onChanged: onChangeType,
+                              hasNote: note != null,
+                              onEditNote: onEditNote,
+                              onShare: onShare,
                             ),
                           ],
                         ),
@@ -400,10 +467,10 @@ class _CollectListTile extends StatelessWidget {
                                               overflow: TextOverflow.ellipsis,
                                               style: theme.textTheme.bodySmall
                                                   ?.copyWith(
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w500,
-                                                color: colors.onSurface,
-                                              ),
+                                                    fontSize: 13,
+                                                    fontWeight: FontWeight.w500,
+                                                    color: colors.onSurface,
+                                                  ),
                                             ),
                                           ),
                                         ],
@@ -418,10 +485,15 @@ class _CollectListTile extends StatelessWidget {
                                         overflow: TextOverflow.ellipsis,
                                         style: theme.textTheme.bodySmall
                                             ?.copyWith(
-                                          fontSize: 12,
-                                          color: colors.onSurfaceVariant,
-                                        ),
+                                              fontSize: 12,
+                                              color: colors.onSurfaceVariant,
+                                            ),
                                       ),
+                                    ),
+                                  if (note != null)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 6),
+                                      child: _NoteLine(note: note!),
                                     ),
                                 ],
                               ),
@@ -447,8 +519,9 @@ class _CollectListTile extends StatelessWidget {
                                       foregroundColor: colors.primary,
                                       minimumSize: const Size(56, 36),
                                       textStyle: const TextStyle(
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w500),
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w500,
+                                      ),
                                     ),
                                     child: const Text('选集'),
                                   ),
@@ -465,13 +538,20 @@ class _CollectListTile extends StatelessWidget {
                                       minimumSize: const Size(0, 36),
                                       padding:
                                           const EdgeInsetsDirectional.fromSTEB(
-                                              12, 0, 16, 0),
+                                            12,
+                                            0,
+                                            16,
+                                            0,
+                                          ),
                                       textStyle: const TextStyle(
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w600),
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w600,
+                                      ),
                                     ),
-                                    icon: const Icon(Icons.play_arrow_rounded,
-                                        size: 20),
+                                    icon: const Icon(
+                                      Icons.play_arrow_rounded,
+                                      size: 20,
+                                    ),
                                     label: Text(playLabel),
                                   ),
                               ],
@@ -492,27 +572,24 @@ class _CollectListTile extends StatelessWidget {
 }
 
 class _CollectCover extends StatelessWidget {
-  const _CollectCover({
-    required this.item,
-    this.borderRadius,
-  });
+  const _CollectCover({required this.item, this.borderRadius});
   final BangumiItem item;
   final BorderRadius? borderRadius;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
-        builder: (context, constraints) => Hero(
-          tag: item.id,
-          transitionOnUserGestures: true,
-          flightShuttleBuilder: NetworkImgLayer.heroFlightShuttleBuilder,
-          child: NetworkImgLayer(
-            src: item.images['large'] ?? item.images['common'] ?? '',
-            width: constraints.maxWidth,
-            height: constraints.maxHeight,
-            borderRadius: borderRadius,
-          ),
-        ),
-      );
+    builder: (context, constraints) => Hero(
+      tag: item.id,
+      transitionOnUserGestures: true,
+      flightShuttleBuilder: NetworkImgLayer.heroFlightShuttleBuilder,
+      child: NetworkImgLayer(
+        src: item.images['large'] ?? item.images['common'] ?? '',
+        width: constraints.maxWidth,
+        height: constraints.maxHeight,
+        borderRadius: borderRadius,
+      ),
+    ),
+  );
 }
 
 class _UpdateBadge extends StatelessWidget {
@@ -526,7 +603,9 @@ class _UpdateBadge extends StatelessWidget {
     final colors = Theme.of(context).colorScheme;
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: onCover ? colors.primary : colors.primary.withValues(alpha: 0.12),
+        color: onCover
+            ? colors.primary
+            : colors.primary.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(5),
       ),
       child: Padding(
@@ -552,7 +631,12 @@ class _CollectEntryMenu extends StatelessWidget {
     this.onPlay,
     this.playLabel = '开始观看',
     this.onPickEpisode,
+    this.hasNote = false,
+    this.onEditNote,
+    this.onShare,
   });
+
+  final bool hasNote;
   final CollectedBangumi entry;
   final ValueChanged<CollectType>? onChanged;
 
@@ -560,6 +644,8 @@ class _CollectEntryMenu extends StatelessWidget {
   final VoidCallback? onPlay;
   final String playLabel;
   final VoidCallback? onPickEpisode;
+  final VoidCallback? onEditNote;
+  final VoidCallback? onShare;
 
   @override
   Widget build(BuildContext context) {
@@ -567,15 +653,29 @@ class _CollectEntryMenu extends StatelessWidget {
     final type = CollectType.fromValue(entry.type);
     final title = CollectLibraryQuery.titleOf(entry);
     return KazumiMenuButton(
-      enabled: onChanged != null || onPlay != null || onPickEpisode != null,
+      enabled:
+          onChanged != null ||
+          onPlay != null ||
+          onPickEpisode != null ||
+          onEditNote != null ||
+          onShare != null,
       menuChildren: [
         if (onPlay != null) KazumiMenuItem(onPressed: onPlay, label: playLabel),
         if (onPickEpisode != null)
           KazumiMenuItem(onPressed: onPickEpisode, label: '选集'),
         if (onPlay != null || onPickEpisode != null)
           const Divider(indent: 16, endIndent: 16),
-        for (final status
-            in CollectType.values.where((type) => type.isCollected))
+        if (onEditNote != null)
+          KazumiMenuItem(
+            onPressed: onEditNote,
+            label: hasNote ? '编辑备注' : '写备注',
+          ),
+        if (onShare != null) KazumiMenuItem(onPressed: onShare, label: '分享海报'),
+        if (onEditNote != null || onShare != null)
+          const Divider(indent: 16, endIndent: 16),
+        for (final status in CollectType.values.where(
+          (type) => type.isCollected,
+        ))
           KazumiMenuItem(
             selected: status == type,
             onPressed: onChanged == null || status == type
@@ -585,8 +685,9 @@ class _CollectEntryMenu extends StatelessWidget {
           ),
         const Divider(indent: 16, endIndent: 16),
         KazumiMenuItem(
-          onPressed:
-              onChanged == null ? null : () => onChanged!(CollectType.none),
+          onPressed: onChanged == null
+              ? null
+              : () => onChanged!(CollectType.none),
           label: '取消收藏',
           destructive: true,
         ),
@@ -603,6 +704,31 @@ class _CollectEntryMenu extends StatelessWidget {
           icon: const Icon(Icons.more_horiz_rounded, size: 20),
         );
       },
+    );
+  }
+}
+
+class _NoteLine extends StatelessWidget {
+  const _NoteLine({required this.note});
+
+  final String note;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = MonoPalette.of(context);
+    return Row(
+      children: [
+        Icon(Icons.edit_note_rounded, size: 15, color: palette.secondaryLabel),
+        const SizedBox(width: 4),
+        Flexible(
+          child: Text(
+            note,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 12, color: palette.secondaryLabel),
+          ),
+        ),
+      ],
     );
   }
 }

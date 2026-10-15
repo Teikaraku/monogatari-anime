@@ -676,14 +676,22 @@ class BangumiApi {
   /// Marks episodes of a subject the user has collected as watched (看过).
   /// Bangumi rejects subjects outside the user's collection.
   static Future<void> markEpisodesWatched(
-      int subjectId, List<int> episodeIds) async {
+      int subjectId, List<int> episodeIds) =>
+      _setEpisodesCollection(subjectId, episodeIds, 2);
+
+  /// Clears the episodes' collection state on Bangumi (type 0).
+  static Future<void> unmarkEpisodes(int subjectId, List<int> episodeIds) =>
+      _setEpisodesCollection(subjectId, episodeIds, 0);
+
+  static Future<void> _setEpisodesCollection(
+      int subjectId, List<int> episodeIds, int type) async {
     await _writeRateLimiter.acquire();
     await _client.patch(
       ApiEndpoints.formatUrl(
           ApiEndpoints.bangumiAuthAPIMirrorDomain +
               ApiEndpoints.bangumiSetEpisodesCollection,
           [subjectId]),
-      data: {'episode_id': episodeIds, 'type': 2},
+      data: {'episode_id': episodeIds, 'type': type},
       requiresAuth: true,
     );
   }

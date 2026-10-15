@@ -1143,9 +1143,9 @@ abstract class _VideoPageController with Store implements Disposable {
       );
       if (session.isActive && danmakuSession.isActive) {
         if (result.hasDanmakus) {
-          final bool enableDanmaku = GStorage.getSetting(
-            SettingsKeys.danmakuEnabledByDefault,
-          );
+          final bool enableDanmaku =
+              playerController.rememberedChoices.danmaku ??
+              GStorage.getSetting(SettingsKeys.danmakuEnabledByDefault);
           playerController.danmaku.applyDanmakuLoad(
             result,
             enableDanmaku: enableDanmaku,

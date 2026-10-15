@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui';
@@ -23,6 +24,19 @@ import 'package:kazumi/pages/video/video_playback_args.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/services/platform/desktop_window_config.dart';
 import 'package:kazumi/services/storage/storage.dart';
+import 'package:kazumi/bean/dialog/adaptive_bottom_sheet.dart';
+import 'package:kazumi/bean/dialog/dialog_helper.dart';
+import 'package:kazumi/pages/collect/collect_controller.dart';
+import 'package:kazumi/pages/collect/episode_picker_sheet.dart';
+import 'package:kazumi/pages/history/history_controller.dart';
+import 'package:kazumi/pages/subject/subject_note_dialog.dart';
+import 'package:kazumi/pages/subject/subject_poster.dart';
+import 'package:kazumi/services/plugin/rule_engine_models.dart'
+    show RuleCancelToken;
+import 'package:kazumi/services/player/history_playback_service.dart';
+import 'package:kazumi/services/subject/subject_local_store.dart';
+import 'package:kazumi/services/subject/subject_watch.dart';
+import 'package:kazumi/services/sync/watched_episode_service.dart';
 import 'package:kazumi/utils/device.dart';
 
 class InfoPage extends StatefulWidget {
@@ -40,7 +54,7 @@ class InfoPage extends StatefulWidget {
 }
 
 class _InfoPageState extends State<InfoPage>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, KazumiDialogOwner {
   static const List<String> _infoTabs = <String>['概览', '演职人员'];
   static const Duration _minimumBangumiInfoLoadingDuration = Duration(
     milliseconds: 600,
@@ -52,6 +66,87 @@ class _InfoPageState extends State<InfoPage>
   late final _catalogPrefetch = InfoCatalogPrefetch();
   late int _subjectRevision;
   late final TabController infoTabController;
+  final HistoryController _histories = inject<HistoryController>();
+  final SubjectNotes _notes = inject<SubjectNotes>();
+  final EpisodeMarks _marks = inject<EpisodeMarks>();
+  late final WatchedEpisodeService _episodeSync = WatchedEpisodeService(
+    inject<CollectController>(),
+  );
+
+  BangumiItem get _item => infoController.bangumiItem;
+
+  SubjectWatch get _watch => SubjectWatch.of(
+    _histories.histories,
+    _item.id,
+    marks: _marks.marksFor(_item.id),
+  );
+
+  /// Resumes the latest record from any playback library, or starts.
+  Future<void> _play() async {
+    final record = _watch.latest;
+    if (record == null) {
+      context.pushNamed(
+        '/video/',
+        arguments: OnlineVideoPlaybackArgs(bangumiItem: _item),
+      );
+      return;
+    }
+    await dialogs.run((task) async {
+      final cancelToken = RuleCancelToken();
+      final result = await task.loading(
+        message: '获取中',
+        barrierDismissible: isDesktop(),
+        onCancel: cancelToken.cancel,
+        action: () => inject<HistoryPlaybackService>().open(
+          record,
+          cancelToken: cancelToken,
+        ),
+      );
+      switch (result) {
+        case HistoryPlaybackReady(:final args):
+          task.withContext(
+            (context) => context.pushNamed('/video/', arguments: args),
+          );
+        case HistoryPlaybackUnavailable(:final reason):
+          KazumiDialog.showToast(message: reason);
+      }
+    }, errorMessage: '暂时无法继续播放，请稍后重试');
+  }
+
+  void _playEpisode(int number) => context.pushNamed(
+    '/video/',
+    arguments: OnlineVideoPlaybackArgs(
+      bangumiItem: _item,
+      startEpisodeNumber: number,
+    ),
+  );
+
+  void _pickEpisode() {
+    final watch = _watch;
+    showAdaptiveBottomSheet<void>(
+      context: context,
+      maxHeightFactor: 0.8,
+      builder: (_) => EpisodePickerSheet(
+        bangumiItem: _item,
+        watched: watch.watched,
+        lastWatched: watch.lastWatched,
+        onPlay: _playEpisode,
+        onMark: _markEpisodes,
+      ),
+    );
+  }
+
+  Future<void> _markEpisodes(List<int> episodes, bool watched) async {
+    final item = _item;
+    await _marks.mark(item.id, episodes, watched: watched);
+    unawaited(_episodeSync.syncManualMarks(item, episodes, watched: watched));
+  }
+
+  void _editNote() => unawaited(
+    showSubjectNoteEditor(context, item: _item, notes: _notes),
+  );
+
+  void _share() => unawaited(showSubjectPoster(context, item: _item));
   late final bool showRating;
 
   bool charactersIsLoading = false;
@@ -334,8 +429,14 @@ class _InfoPageState extends State<InfoPage>
                       ),
                     ),
                   EmbeddedNativeControlArea(
-                    child: InfoActionsMenu(
-                      bangumiItem: infoController.bangumiItem,
+                    child: ListenableBuilder(
+                      listenable: _notes,
+                      builder: (context, _) => InfoActionsMenu(
+                        bangumiItem: infoController.bangumiItem,
+                        hasNote: _notes.noteFor(_item.id) != null,
+                        onEditNote: _editNote,
+                        onShare: _share,
+                      ),
                     ),
                   ),
                   if (isDesktop() && !showWindowButton)
@@ -423,10 +524,18 @@ class _InfoPageState extends State<InfoPage>
             ),
           ];
         },
-        body: Observer(
+        body: ListenableBuilder(
+          listenable: Listenable.merge([_notes, _marks]),
+          builder: (context, _) => Observer(
           builder: (context) {
             final showBangumiInfoSkeleton = _isShowingBangumiInfoSkeleton;
+            final watch = _watch;
             return InfoTabView(
+              watched: watch.watched,
+              onPlayEpisode: _playEpisode,
+              onMark: _markEpisodes,
+              note: _notes.noteFor(_item.id),
+              onEditNote: _editNote,
               tabController: infoTabController,
               bangumiItem: infoController.bangumiItem,
               isLoading: showBangumiInfoSkeleton,
@@ -450,20 +559,45 @@ class _InfoPageState extends State<InfoPage>
               loadRelations: loadRelations,
             );
           },
+          ),
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        tooltip: '开始观看',
-        onPressed: () {
-          context.pushNamed(
-            '/video/',
-            arguments: OnlineVideoPlaybackArgs(
-              bangumiItem: infoController.bangumiItem,
-            ),
-          );
-        },
-        label: const Text('开始观看'),
-        icon: const Icon(Icons.play_arrow_rounded),
+      floatingActionButton: ListenableBuilder(
+        listenable: _marks,
+        builder: (context, _) => Observer(
+          builder: (context) {
+            final last = _watch.latest?.watchedEpisodeNumber ?? 0;
+            final label = _watch.latest == null
+                ? '开始观看'
+                : last > 0
+                ? '继续观看 · 第 $last 话'
+                : '继续观看';
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton.extended(
+                  heroTag: 'info-pick-episode',
+                  tooltip: '选集',
+                  elevation: 1,
+                  backgroundColor:
+                      Theme.of(context).colorScheme.surfaceContainerHigh,
+                  foregroundColor: Theme.of(context).colorScheme.onSurface,
+                  onPressed: _pickEpisode,
+                  label: const Text('选集'),
+                  icon: const Icon(Icons.format_list_numbered_rounded),
+                ),
+                const SizedBox(width: 12),
+                FloatingActionButton.extended(
+                  heroTag: 'info-play',
+                  tooltip: label,
+                  onPressed: dialogs.isRunning ? null : _play,
+                  label: Text(label),
+                  icon: const Icon(Icons.play_arrow_rounded),
+                ),
+              ],
+            );
+          },
+        ),
       ),
     );
   }

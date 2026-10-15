@@ -37,6 +37,9 @@ class CollectLibraryView extends StatefulWidget {
     this.progress = const {},
     this.onPlay,
     this.onPickEpisode,
+    this.notes = const {},
+    this.onEditNote,
+    this.onShare,
   });
 
   final List<CollectedBangumi> entries;
@@ -56,6 +59,11 @@ class CollectLibraryView extends StatefulWidget {
   /// Opens the episode picker of a show.
   final ValueChanged<BangumiItem>? onPickEpisode;
 
+  /// Personal notes by subject id.
+  final Map<int, String> notes;
+  final ValueChanged<BangumiItem>? onEditNote;
+  final ValueChanged<BangumiItem>? onShare;
+
   @override
   State<CollectLibraryView> createState() => _CollectLibraryViewState();
 }
@@ -74,8 +82,9 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
   };
   PageStorageBucket _resultsStorage = PageStorageBucket();
   CollectType? _selectedType = CollectType.watching;
-  CollectSort _sort =
-      CollectSort.fromName(GStorage.getSetting(SettingsKeys.collectSort));
+  CollectSort _sort = CollectSort.fromName(
+    GStorage.getSetting(SettingsKeys.collectSort),
+  );
   String _query = '';
   bool _searchExpanded = false;
 
@@ -173,41 +182,49 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
       child: Focus(
         focusNode: _libraryFocus,
         autofocus: true,
-        child: LayoutBuilder(builder: (context, constraints) {
-          final compact = constraints.maxWidth < 600;
-          final paged = mobile &&
-              MediaQuery.orientationOf(context) == Orientation.portrait &&
-              constraints.maxHeight > 320;
-          final width = constraints.maxWidth.clamp(0.0, 1560.0);
-          final inset =
-              (constraints.maxWidth - width) / 2 + (compact ? 16.0 : 32.0);
-          final header = _header(query, compact: compact);
-          return PageStorage(
-            bucket: _resultsStorage,
-            child: paged
-                ? Column(
-                    children: [
-                      Padding(
-                        padding: EdgeInsets.symmetric(horizontal: inset),
-                        child: header,
-                      ),
-                      Expanded(
-                        child: TabBarView(
-                          controller: _tabController,
-                          children: [
-                            for (final type in _collectCategories)
-                              HeroMode(
-                                enabled: type == _selectedType,
-                                child: _results(query, type, inset: inset),
-                              ),
-                          ],
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final compact = constraints.maxWidth < 600;
+            final paged =
+                mobile &&
+                MediaQuery.orientationOf(context) == Orientation.portrait &&
+                constraints.maxHeight > 320;
+            final width = constraints.maxWidth.clamp(0.0, 1560.0);
+            final inset =
+                (constraints.maxWidth - width) / 2 + (compact ? 16.0 : 32.0);
+            final header = _header(query, compact: compact);
+            return PageStorage(
+              bucket: _resultsStorage,
+              child: paged
+                  ? Column(
+                      children: [
+                        Padding(
+                          padding: EdgeInsets.symmetric(horizontal: inset),
+                          child: header,
                         ),
-                      ),
-                    ],
-                  )
-                : _results(query, _selectedType, inset: inset, header: header),
-          );
-        }),
+                        Expanded(
+                          child: TabBarView(
+                            controller: _tabController,
+                            children: [
+                              for (final type in _collectCategories)
+                                HeroMode(
+                                  enabled: type == _selectedType,
+                                  child: _results(query, type, inset: inset),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    )
+                  : _results(
+                      query,
+                      _selectedType,
+                      inset: inset,
+                      header: header,
+                    ),
+            );
+          },
+        ),
       ),
     );
   }
@@ -231,8 +248,8 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
                 child: Text(
                   '${query.count(_selectedType)} 部',
                   style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
                 ),
               ),
           ],
@@ -257,8 +274,8 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
                 ),
               ),
             const SizedBox(width: 12),
@@ -299,112 +316,142 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
   }
 
   Widget _searchBar() => Semantics(
-        label: '搜索收藏',
-        child: SearchBar(
-          controller: _searchController,
-          focusNode: _searchFocus,
-          hintText: '在追番中查找',
-          leading: Icon(Icons.search_rounded,
-              size: 22, color: Theme.of(context).colorScheme.onSurfaceVariant),
-          trailing: [
-            if (_query.isNotEmpty)
-              IconButton(
-                tooltip: '清除搜索',
-                onPressed: () {
-                  _searchController.clear();
-                  _search('');
-                },
-                icon: const Icon(Icons.cancel_rounded, size: 18),
-              ),
-          ],
-          elevation: const WidgetStatePropertyAll(0),
-          backgroundColor:
-              WidgetStatePropertyAll(MonoPalette.of(context).fill),
-          shape: WidgetStatePropertyAll(
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-          hintStyle: WidgetStatePropertyAll(TextStyle(
-              fontSize: 16,
-              color: Theme.of(context).colorScheme.onSurfaceVariant)),
-          textStyle: const WidgetStatePropertyAll(TextStyle(fontSize: 16)),
-          padding: const WidgetStatePropertyAll(
-              EdgeInsets.symmetric(horizontal: 12)),
-          constraints: const BoxConstraints(minHeight: 44),
-          onChanged: _search,
-          onSubmitted: (_) => _libraryFocus.requestFocus(),
+    label: '搜索收藏',
+    child: SearchBar(
+      controller: _searchController,
+      focusNode: _searchFocus,
+      hintText: '在追番中查找',
+      leading: Icon(
+        Icons.search_rounded,
+        size: 22,
+        color: Theme.of(context).colorScheme.onSurfaceVariant,
+      ),
+      trailing: [
+        if (_query.isNotEmpty)
+          IconButton(
+            tooltip: '清除搜索',
+            onPressed: () {
+              _searchController.clear();
+              _search('');
+            },
+            icon: const Icon(Icons.cancel_rounded, size: 18),
+          ),
+      ],
+      elevation: const WidgetStatePropertyAll(0),
+      backgroundColor: WidgetStatePropertyAll(MonoPalette.of(context).fill),
+      shape: WidgetStatePropertyAll(
+        RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+      hintStyle: WidgetStatePropertyAll(
+        TextStyle(
+          fontSize: 16,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
         ),
-      );
+      ),
+      textStyle: const WidgetStatePropertyAll(TextStyle(fontSize: 16)),
+      padding: const WidgetStatePropertyAll(
+        EdgeInsets.symmetric(horizontal: 12),
+      ),
+      constraints: const BoxConstraints(minHeight: 44),
+      onChanged: _search,
+      onSubmitted: (_) => _libraryFocus.requestFocus(),
+    ),
+  );
 
-  Widget _results(CollectLibraryQuery query, CollectType? type,
-      {required double inset, Widget? header}) {
-    return LayoutBuilder(builder: (context, constraints) {
-      final entries = query.results(type, _sort, lastWatched: {
-        for (final MapEntry(:key, :value) in widget.progress.entries)
-          if (value.history != null) key: value.history!.lastWatchTime,
-      });
-      final contentWidth = constraints.maxWidth - inset * 2;
-      return ScrollbarTheme(
-        data: ScrollbarTheme.of(context).copyWith(crossAxisMargin: 0),
-        child: CustomScrollView(
-          key: PageStorageKey('collect-results-${type?.value ?? 'all'}'),
-          controller: _scrollControllers[type],
-          semanticChildCount: entries.length,
-          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-          slivers: [
-            if (header != null)
-              SliverPadding(
-                padding: EdgeInsets.symmetric(horizontal: inset),
-                sliver: SliverToBoxAdapter(child: header),
-              ),
-            if (entries.isEmpty)
-              SliverFillRemaining(
-                hasScrollBody: false,
-                child: Padding(
+  Widget _results(
+    CollectLibraryQuery query,
+    CollectType? type, {
+    required double inset,
+    Widget? header,
+  }) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final entries = query.results(
+          type,
+          _sort,
+          lastWatched: {
+            for (final MapEntry(:key, :value) in widget.progress.entries)
+              if (value.history != null) key: value.history!.lastWatchTime,
+          },
+        );
+        final contentWidth = constraints.maxWidth - inset * 2;
+        return ScrollbarTheme(
+          data: ScrollbarTheme.of(context).copyWith(crossAxisMargin: 0),
+          child: CustomScrollView(
+            key: PageStorageKey('collect-results-${type?.value ?? 'all'}'),
+            controller: _scrollControllers[type],
+            semanticChildCount: entries.length,
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            slivers: [
+              if (header != null)
+                SliverPadding(
                   padding: EdgeInsets.symmetric(horizontal: inset),
-                  child: _emptyState(query.count(null), type: type),
+                  sliver: SliverToBoxAdapter(child: header),
                 ),
-              )
-            else
-              SliverPadding(
-                padding: EdgeInsets.fromLTRB(
-                    inset, 0, inset, 24 + MediaQuery.paddingOf(context).bottom),
-                sliver: widget.layout == CollectLayout.cards
-                    ? _grid(entries, contentWidth, type: type)
-                    : _list(entries, contentWidth, type: type),
-              ),
-          ],
-        ),
-      );
-    });
+              if (entries.isEmpty)
+                SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: inset),
+                    child: _emptyState(query.count(null), type: type),
+                  ),
+                )
+              else
+                SliverPadding(
+                  padding: EdgeInsets.fromLTRB(
+                    inset,
+                    0,
+                    inset,
+                    24 + MediaQuery.paddingOf(context).bottom,
+                  ),
+                  sliver: widget.layout == CollectLayout.cards
+                      ? _grid(entries, contentWidth, type: type)
+                      : _list(entries, contentWidth, type: type),
+                ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
-  Widget _list(List<CollectedBangumi> entries, double contentWidth,
-      {required CollectType? type}) {
+  Widget _list(
+    List<CollectedBangumi> entries,
+    double contentWidth, {
+    required CollectType? type,
+  }) {
     const spacing = 12.0;
-    final textScale = (MediaQuery.textScalerOf(context).scale(14) / 14)
-        .clamp(1.0, double.infinity);
+    final textScale = (MediaQuery.textScalerOf(context).scale(14) / 14).clamp(
+      1.0,
+      double.infinity,
+    );
     final minWidth = 300 + 160 * (textScale - 1);
     final preferredWidth = 400 + 160 * (textScale - 1);
-    final maxColumns =
-        ((contentWidth + spacing) / (minWidth + spacing)).floor().clamp(1, 12);
+    final maxColumns = ((contentWidth + spacing) / (minWidth + spacing))
+        .floor()
+        .clamp(1, 12);
     final columns = ((contentWidth + spacing) / (preferredWidth + spacing))
         .ceil()
         .clamp(1, maxColumns);
 
     Widget tile(int index) => IndexedSemantics(
-          index: index,
-          child: _CollectListTile(
-            key: ValueKey('collect-${entries[index].bangumiItem.id}'),
-            entry: entries[index],
-            showRating: widget.showRating,
-            showStatus: type == null,
-            progress: widget.progress[entries[index].bangumiItem.id],
-            onOpen: () => widget.onOpen(entries[index].bangumiItem),
-            onChangeType: _changeTypeFor(entries[index]),
-            onPlay: _playFor(entries[index]),
-            playLabel: _playLabelFor(entries[index]),
-            onPickEpisode: _pickEpisodeFor(entries[index]),
-          ),
-        );
+      index: index,
+      child: _CollectListTile(
+        key: ValueKey('collect-${entries[index].bangumiItem.id}'),
+        entry: entries[index],
+        showRating: widget.showRating,
+        showStatus: type == null,
+        progress: widget.progress[entries[index].bangumiItem.id],
+        onOpen: () => widget.onOpen(entries[index].bangumiItem),
+        onChangeType: _changeTypeFor(entries[index]),
+        onPlay: _playFor(entries[index]),
+        playLabel: _playLabelFor(entries[index]),
+        onPickEpisode: _pickEpisodeFor(entries[index]),
+        note: widget.notes[entries[index].bangumiItem.id],
+        onEditNote: _forEntry(widget.onEditNote, entries[index]),
+        onShare: _forEntry(widget.onShare, entries[index]),
+      ),
+    );
 
     return SliverList.builder(
       itemCount: (entries.length + columns - 1) ~/ columns,
@@ -436,8 +483,8 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
 
   ValueChanged<CollectType>? _changeTypeFor(CollectedBangumi entry) =>
       widget.canEdit(entry.bangumiItem)
-          ? (type) => widget.onChangeType(entry.bangumiItem, type)
-          : null;
+      ? (type) => widget.onChangeType(entry.bangumiItem, type)
+      : null;
 
   VoidCallback? _playFor(CollectedBangumi entry) {
     final onPlay = widget.onPlay;
@@ -448,13 +495,23 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
   String _playLabelFor(CollectedBangumi entry) =>
       widget.progress[entry.bangumiItem.id]?.history != null ? '继续看' : '开始观看';
 
+  VoidCallback? _forEntry(
+    ValueChanged<BangumiItem>? action,
+    CollectedBangumi entry,
+  ) => action == null ? null : () => action(entry.bangumiItem);
+
   VoidCallback? _pickEpisodeFor(CollectedBangumi entry) {
     final onPickEpisode = widget.onPickEpisode;
-    return onPickEpisode == null ? null : () => onPickEpisode(entry.bangumiItem);
+    return onPickEpisode == null
+        ? null
+        : () => onPickEpisode(entry.bangumiItem);
   }
 
-  Widget _grid(List<CollectedBangumi> entries, double contentWidth,
-      {required CollectType? type}) {
+  Widget _grid(
+    List<CollectedBangumi> entries,
+    double contentWidth, {
+    required CollectType? type,
+  }) {
     final portrait = MediaQuery.orientationOf(context) == Orientation.portrait;
     final spacing = portrait ? (contentWidth < 600 ? 8.0 : 12.0) : 16.0;
     final scaler = MediaQuery.textScalerOf(context);
@@ -470,8 +527,12 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
         crossAxisCount: columns,
         crossAxisSpacing: spacing,
         mainAxisSpacing: portrait ? 12 : spacing,
-        mainAxisExtent: _CollectPosterCard.extent(width, scaler,
-            showRating: widget.showRating, showStatus: type == null),
+        mainAxisExtent: _CollectPosterCard.extent(
+          width,
+          scaler,
+          showRating: widget.showRating,
+          showStatus: type == null,
+        ),
       ),
       itemCount: entries.length,
       itemBuilder: (context, index) => _CollectPosterCard(
@@ -485,6 +546,9 @@ class _CollectLibraryViewState extends State<CollectLibraryView>
         onPlay: _playFor(entries[index]),
         playLabel: _playLabelFor(entries[index]),
         onPickEpisode: _pickEpisodeFor(entries[index]),
+        hasNote: widget.notes.containsKey(entries[index].bangumiItem.id),
+        onEditNote: _forEntry(widget.onEditNote, entries[index]),
+        onShare: _forEntry(widget.onShare, entries[index]),
       ),
     );
   }

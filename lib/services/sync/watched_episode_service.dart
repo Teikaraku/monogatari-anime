@@ -71,6 +71,33 @@ class WatchedEpisodeService {
     }
   }
 
+  /// Mirrors episodes the user marked by hand to Bangumi, under the same rule
+  /// as playback: only for shows in 追番 with episode sync turned on.
+  Future<void> syncManualMarks(
+    BangumiItem item,
+    Iterable<int> episodeNumbers, {
+    required bool watched,
+  }) async {
+    if (!_syncEpisodes) return;
+    final type = CollectType.fromValue(_collectController.getCollectType(item));
+    if (!type.isCollected) return;
+    try {
+      final episodes = await MainEpisodeCache.get(item.id);
+      final ids = <int>{
+        for (final number in episodeNumbers)
+          if (_episodeFor(episodes, number) case final episode?) episode.id,
+      }.toList();
+      if (ids.isEmpty) return;
+      if (watched) {
+        await BangumiApi.markEpisodesWatched(item.id, ids);
+      } else {
+        await BangumiApi.unmarkEpisodes(item.id, ids);
+      }
+    } catch (e) {
+      KazumiLogger().w('WatchedEpisode: manual mark sync failed', error: e);
+    }
+  }
+
   static EpisodeInfo? _episodeFor(List<EpisodeInfo> episodes, int number) {
     for (final episode in episodes) {
       if (episode.displayNumber == number) return episode;

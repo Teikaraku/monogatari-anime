@@ -16,6 +16,8 @@ import 'package:kazumi/pages/player/controller/player_playback_controller.dart';
 import 'package:kazumi/pages/player/controller/player_super_resolution.dart';
 import 'package:kazumi/pages/player/controller/player_syncplay_controller.dart';
 import 'package:kazumi/pages/player/controller/player_screenshot_controller.dart';
+import 'package:kazumi/pages/player/controller/track_choice.dart';
+import 'package:kazumi/services/subject/subject_local_store.dart';
 import 'package:kazumi/services/storage/storage.dart';
 import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/services/shaders/shader_asset_service.dart';
@@ -188,7 +190,9 @@ class PlayerController implements Disposable {
 
     playback.resetForInit();
     debug.playerLogLevel = GStorage.getSetting(SettingsKeys.playerLogLevel);
-    playback.playerSpeed = GStorage.getSetting(SettingsKeys.defaultPlaySpeed);
+    playback.playerSpeed =
+        rememberedChoices.speed ??
+        GStorage.getSetting(SettingsKeys.defaultPlaySpeed);
     panel.aspectRatioMode = PlayerAspectRatio.fromStorageValue(
       GStorage.getSetting(SettingsKeys.defaultAspectRatioType),
     );
@@ -287,6 +291,7 @@ class PlayerController implements Disposable {
     }
     KazumiLogger().i('PlayerController: video initialized');
     playback.loading = false;
+    _applyRememberedTracks(player, initialization);
 
     coverUrl = params.coverUrl;
 
@@ -315,6 +320,145 @@ class PlayerController implements Disposable {
     try {
       updateDanmakuSpeed();
     } catch (_) {}
+  }
+
+  StreamSubscription<Tracks>? _trackSubscription;
+
+  // Tests and previews may run without the app's modules.
+  SubjectPlayerChoices? get _choices {
+    try {
+      return inject<SubjectPlayerChoices>();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// What the current show remembers: speed, danmaku and tracks.
+  PlayerChoices get rememberedChoices => bangumiId > 0
+      ? (_choices?.choicesFor(bangumiId) ?? const PlayerChoices())
+      : const PlayerChoices();
+
+  /// A speed the user picked; the show keeps it. Temporary speeds such as a
+  /// long press use [setPlaybackSpeed] instead.
+  Future<void> chooseSpeed(double speed) async {
+    await setPlaybackSpeed(speed);
+    if (bangumiId > 0) unawaited(_choices?.update(bangumiId, speed: speed));
+  }
+
+  void rememberDanmaku(bool enabled) {
+    if (bangumiId > 0) unawaited(_choices?.update(bangumiId, danmaku: enabled));
+  }
+
+  static List<TrackInfo> _audioInfos(List<AudioTrack> tracks) => [
+    for (final track in tracks)
+      (id: track.id, title: track.title, language: track.language),
+  ];
+
+  static List<TrackInfo> _subtitleInfos(List<SubtitleTrack> tracks) => [
+    for (final track in tracks)
+      (id: track.id, title: track.title, language: track.language),
+  ];
+
+  static List<AudioTrack> realAudioTracks(Tracks tracks) => [
+    for (final track in tracks.audio)
+      if (isRealTrack(track.id) && !track.uri) track,
+  ];
+
+  static List<SubtitleTrack> realSubtitleTracks(Tracks tracks) => [
+    for (final track in tracks.subtitle)
+      if (isRealTrack(track.id) && !track.uri && !track.data) track,
+  ];
+
+  Future<void> chooseAudioTrack(AudioTrack track) async {
+    final player = playback.mediaPlayer;
+    if (player == null) return;
+    await player.setAudioTrack(track);
+    final real = realAudioTracks(player.state.tracks);
+    final index = real.indexWhere((candidate) => candidate.id == track.id);
+    if (index >= 0 && bangumiId > 0) {
+      unawaited(
+        _choices?.update(bangumiId, audio: choiceFor(_audioInfos(real), index)),
+      );
+    }
+  }
+
+  /// Subtitles from the file are remembered by language and title; turning
+  /// them off is remembered too. External files are not.
+  Future<void> chooseSubtitleTrack(SubtitleTrack track) async {
+    final player = playback.mediaPlayer;
+    if (player == null) return;
+    await player.setSubtitleTrack(track);
+    if (bangumiId <= 0 || track.uri || track.data) return;
+    if (track.id == 'no') {
+      unawaited(
+        _choices?.update(bangumiId, subtitle: const TrackChoice(off: true)),
+      );
+      return;
+    }
+    final real = realSubtitleTracks(player.state.tracks);
+    final index = real.indexWhere((candidate) => candidate.id == track.id);
+    if (index >= 0) {
+      unawaited(
+        _choices?.update(
+          bangumiId,
+          subtitle: choiceFor(_subtitleInfos(real), index),
+        ),
+      );
+    }
+  }
+
+  Future<void> loadExternalSubtitle(String path, {String? title}) async {
+    final player = playback.mediaPlayer;
+    if (player == null) return;
+    await player.setSubtitleTrack(SubtitleTrack.uri(path, title: title));
+  }
+
+  /// Once the file's tracks are known, selects what the show used before and
+  /// stops listening.
+  void _applyRememberedTracks(Player player, AsyncSession initialization) {
+    unawaited(_trackSubscription?.cancel());
+    _trackSubscription = null;
+    final choices = rememberedChoices;
+    var audioDone = choices.audio == null;
+    var subtitleDone = choices.subtitle == null;
+    if (audioDone && subtitleDone) return;
+    void apply(Tracks tracks) {
+      if (!_ownsInitialization(initialization, player)) {
+        audioDone = subtitleDone = true;
+      }
+      if (!audioDone) {
+        final real = realAudioTracks(tracks);
+        if (real.isNotEmpty) {
+          audioDone = true;
+          final index = matchTrackIndex(_audioInfos(real), choices.audio!);
+          if (index != null && real.length > 1) {
+            unawaited(player.setAudioTrack(real[index]));
+          }
+        }
+      }
+      if (!subtitleDone) {
+        final real = realSubtitleTracks(tracks);
+        if (real.isNotEmpty) {
+          subtitleDone = true;
+          final choice = choices.subtitle!;
+          if (choice.off) {
+            unawaited(player.setSubtitleTrack(SubtitleTrack.no()));
+          } else if (matchTrackIndex(_subtitleInfos(real), choice)
+              case final index?) {
+            unawaited(player.setSubtitleTrack(real[index]));
+          }
+        }
+      }
+      if (audioDone && subtitleDone) {
+        unawaited(_trackSubscription?.cancel());
+        _trackSubscription = null;
+      }
+    }
+
+    apply(player.state.tracks);
+    if (!audioDone || !subtitleDone) {
+      _trackSubscription = player.stream.tracks.listen(apply);
+    }
   }
 
   void updateDanmakuSpeed() {
@@ -420,6 +564,8 @@ class PlayerController implements Disposable {
   }
 
   Future<void> _releasePlaybackResources() async {
+    unawaited(_trackSubscription?.cancel());
+    _trackSubscription = null;
     hideVolumeUITimer?.cancel();
     _volumeGestureSyncTimer?.cancel();
     FlutterVolumeController.removeListener();

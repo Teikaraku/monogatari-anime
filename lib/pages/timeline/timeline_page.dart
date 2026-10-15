@@ -186,6 +186,11 @@ class _TimelinePageState extends State<TimelinePage> {
             title: const Text('时间表'),
             contentWidth: (width) => width - inset * 2 + 40,
             actions: [
+              IconButton(
+                tooltip: '新番速览',
+                onPressed: () => context.pushNamed('/season-preview/'),
+                icon: const Icon(Icons.style_rounded),
+              ),
               if (narrowPortrait)
                 _buildSeasonPicker(context, loading: loading, inAppBar: true),
               _TimelineOptionsButton(
