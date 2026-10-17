@@ -31,7 +31,7 @@ class EpisodeInfo {
         episode: json['sort'] ?? 0,
         type: json['type'] ?? 0,
         name: json['name'] ?? '',
-        nameCn: json['name_cn'] ?? '',
+        nameCn: json['name_cn'] ?? json['nameCN'] ?? '',
         seasonEpisode: json['ep'] ?? 0,
         airDate: (json['airdate'] ?? '').toString().trim(),
         duration: (json['duration'] ?? '').toString().trim(),

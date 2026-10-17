@@ -3,6 +3,25 @@ import 'package:kazumi/request/apis/bangumi_api.dart';
 import 'package:kazumi/utils/search_parser.dart';
 
 void main() {
+  test('p1 preserves filters using its own schema', () {
+    final params = BangumiApi.buildBangumiNextSearchParams(
+      '芙莉莲',
+      tags: ['漫画改', '芳文社'],
+      sort: 'rank',
+      dateRange: const SearchDateRange(start: '2023-10-01', end: '2024-01-01'),
+      rankRange: const SearchIntRange(min: 1, max: 1000),
+      weekdays: [1, 6],
+    );
+    final filter = params['filter'] as Map;
+    expect(filter['metaTags'], ['漫画改']);
+    expect(filter['tags'], ['芳文社']);
+    expect(filter['date'], ['>=2023-10-01', '<2024-01-01']);
+    expect(filter['rank'], ['>=1', '<=1000']);
+    expect(filter['nsfw'], false);
+    expect(filter.keys, isNot(contains('meta_tags')));
+    expect(filter.keys, isNot(contains('air_date')));
+    expect(filter.keys, isNot(contains('air_weekday')));
+  });
   group('BangumiApi.buildBangumiSearchParams', () {
     test('keeps default search params compatible', () {
       final params = BangumiApi.buildBangumiSearchParams('frieren');

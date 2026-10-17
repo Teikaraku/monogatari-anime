@@ -98,14 +98,13 @@ class BangumiClient {
     Object? data,
   }) {
     final headers = <String, dynamic>{...bangumiHTTPHeader};
-    final bangumiSyncEnable = GStorage.getSetting(
-      SettingsKeys.bangumiSyncEnable,
-    );
     final token =
         (accessToken ??
                 GStorage.getSetting<String>(SettingsKeys.bangumiAccessToken))
             .trim();
-    if ((requiresAuth || bangumiSyncEnable) && token.isNotEmpty) {
+    // Public catalogs do not need an account. Keeping their requests public
+    // also permits the mirror/official race while sync remains authenticated.
+    if (requiresAuth && token.isNotEmpty) {
       headers['Authorization'] = 'Bearer $token';
     }
     return headers;

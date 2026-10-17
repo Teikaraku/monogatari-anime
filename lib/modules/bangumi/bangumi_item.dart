@@ -116,6 +116,14 @@ class BangumiItem {
         final fromAir = nonEmpty(airtime['date']);
         if (fromAir != null) return fromAir;
       }
+      // p1 search returns SlimSubject: its date is in the official info text,
+      // while the full subject endpoint supplies airtime.date.
+      final match = RegExp(
+        r'(?:^| / )(\d{4})年(\d{1,2})月(\d{1,2})日(?: / |$)',
+      ).firstMatch(jsonData['info']?.toString() ?? '');
+      if (match != null) {
+        return '${match[1]}-${match[2]!.padLeft(2, '0')}-${match[3]!.padLeft(2, '0')}';
+      }
       return '';
     }
 

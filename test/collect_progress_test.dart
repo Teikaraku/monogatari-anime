@@ -26,6 +26,95 @@ void main() {
       ];
 
   group('AiringSummary', () {
+    test('does not announce tonight before the exact broadcast time', () {
+      final slot = BroadcastSlot(
+        start: DateTime.utc(2026, 10, 1, 12, 30),
+        periodDays: 7,
+      ); // 21:30 JST
+      final source = episodes(['2026-10-01', '2026-10-08', '2026-10-15']);
+      final before = AiringSummary.of(
+        source,
+        slot: slot,
+        today: DateTime.utc(2026, 10, 8, 11),
+        requireBroadcastTime: true,
+      );
+      expect(before.latest!.displayNumber, 1);
+      expect(before.next!.displayNumber, 2);
+      expect(
+        CollectProgress(history: _history(1), airing: before).hasUpdate,
+        false,
+      );
+      final after = AiringSummary.of(
+        source,
+        slot: slot,
+        today: DateTime.utc(2026, 10, 8, 12, 30),
+        requireBroadcastTime: true,
+      );
+      expect(after.latest!.displayNumber, 2);
+      expect(
+        CollectProgress(history: _history(1), airing: after).hasUpdate,
+        true,
+      );
+    });
+
+    test('uses Japan time across midnight and the nominal late-night date', () {
+      final slot = BroadcastSlot(
+        start: DateTime.utc(2026, 10, 1, 16, 30),
+        periodDays: 7,
+      ); // Oct 2 at 01:30 JST; listed as Oct 1 late night
+      final source = episodes(['2026-10-01', '2026-10-08']);
+      final before = AiringSummary.of(
+        source,
+        slot: slot,
+        today: DateTime.utc(2026, 10, 8, 16, 29),
+        requireBroadcastTime: true,
+      );
+      expect(before.latest!.displayNumber, 1);
+      final after = AiringSummary.of(
+        source,
+        slot: slot,
+        today: DateTime.utc(2026, 10, 8, 16, 30),
+        requireBroadcastTime: true,
+      );
+      expect(after.latest!.displayNumber, 2);
+    });
+
+    test('respects a rescheduled episode date rather than counting weeks', () {
+      final slot = BroadcastSlot(
+        start: DateTime.utc(2026, 10, 1, 12, 30),
+        periodDays: 7,
+      );
+      final source = episodes(['2026-10-01', '2026-10-09']);
+      expect(
+        AiringSummary.of(
+          source,
+          slot: slot,
+          today: DateTime.utc(2026, 10, 8, 14),
+          requireBroadcastTime: true,
+        ).latest!.displayNumber,
+        1,
+      );
+    });
+
+    test(
+      'a missing clock time cannot establish availability earlier today',
+      () {
+        final source = episodes(['2026-10-01', '2026-10-08']);
+        final before = AiringSummary.of(
+          source,
+          today: DateTime.utc(2026, 10, 8, 10),
+          requireBroadcastTime: true,
+        );
+        expect(before.latest!.displayNumber, 1);
+        final after = AiringSummary.of(
+          source,
+          today: DateTime.utc(2026, 10, 8, 15),
+          requireBroadcastTime: true,
+        );
+        expect(after.latest!.displayNumber, 2);
+      },
+    );
+
     test('tracks the latest aired and the next episode', () {
       final summary = AiringSummary.of(
         episodes(['2026-10-01', '2026-10-08', '2026-10-15', '']),

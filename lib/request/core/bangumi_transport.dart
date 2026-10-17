@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -53,7 +55,7 @@ class BangumiEchAdapter implements HttpClientAdapter {
   final HttpClientAdapter _fallback;
   final NetworkConfig _config;
   final http.Client Function(RequestOptions)? _injectedClient;
-  DateTime? _mirrorUnavailableUntil;
+  final _races = <Completer<void>>{};
   final _resolvers = <Uri?, DohEchResolver>{};
   final _clients = <(Uri?, Uri?, Duration, Duration), EchClient>{};
   final _activeRequests = <Completer<void>>{};
@@ -102,38 +104,23 @@ class BangumiEchAdapter implements HttpClientAdapter {
       final recoverable =
           original != null &&
           ApiEndpoints.bangumiPublicApiHosts.contains(original.host) &&
+          !original.path.startsWith('/v0/users/') &&
+          original.path != '/v0/me' &&
+          options.responseType == ResponseType.json &&
           options.uri.host ==
               Uri.parse(ApiEndpoints.bangumiMirrorDomain).host &&
-          options.method == 'GET' &&
-          requestStream == null &&
+          (options.method == 'GET' && requestStream == null ||
+              options.method == 'POST' &&
+                  const {
+                    '/p1/search/subjects',
+                    '/v0/search/subjects',
+                  }.contains(original.path)) &&
           !options.headers.keys.any(
             (name) =>
                 const {'authorization', 'cookie'}.contains(name.toLowerCase()),
           );
-      if (!recoverable)
+      if (!recoverable) {
         return _fallback.fetch(options, requestStream, cancelFuture);
-      if (_mirrorUnavailableUntil == null ||
-          DateTime.now().isAfter(_mirrorUnavailableUntil!)) {
-        try {
-          final response = await _fallback.fetch(
-            options,
-            requestStream,
-            cancelFuture,
-          );
-          if (response.statusCode < 500) {
-            _mirrorUnavailableUntil = null;
-            return response;
-          }
-          await response.stream.listen((_) {}).cancel();
-        } catch (error) {
-          if (error is DioException &&
-              (error.type == DioExceptionType.cancel ||
-                  error.type == DioExceptionType.badCertificate))
-            rethrow;
-        }
-        _mirrorUnavailableUntil = DateTime.now().add(
-          const Duration(seconds: 30),
-        );
       }
       final recovery = options.copyWith(
         path: original.toString(),
@@ -141,7 +128,7 @@ class BangumiEchAdapter implements HttpClientAdapter {
         queryParameters: {},
         extra: {...options.extra, _echRequestKey: true},
       );
-      return fetch(recovery, null, cancelFuture);
+      return _racePublic(options, recovery, requestStream, cancelFuture);
     }
 
     final abort = Completer<void>();
@@ -202,6 +189,163 @@ class BangumiEchAdapter implements HttpClientAdapter {
     }
   }
 
+  /// Race complete documents: a fast error page or a header followed by a
+  /// stalled body must not cancel a working route. Only public reads and the
+  /// explicitly allowlisted read-only search POST can be replayed.
+  Future<ResponseBody> _racePublic(
+    RequestOptions mirror,
+    RequestOptions official,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    final abort = Completer<void>();
+    _races.add(abort);
+    final ready = Completer<ResponseBody>();
+    ready.future.ignore();
+    final attempts = [Completer<void>(), Completer<void>()];
+    void cancel() {
+      for (final attempt in attempts) {
+        if (!attempt.isCompleted) attempt.complete();
+      }
+      if (!ready.isCompleted) {
+        ready.completeError(
+          DioException.requestCancelled(
+            requestOptions: mirror,
+            reason: 'Bangumi request cancelled',
+          ),
+        );
+      }
+    }
+
+    unawaited(abort.future.then((_) => cancel()));
+    if (cancelFuture != null) {
+      unawaited(
+        cancelFuture.then((_) {
+          if (!abort.isCompleted) abort.complete();
+        }),
+      );
+    }
+    var failed = 0;
+    try {
+      Uint8List? body;
+      if (requestStream != null) {
+        body = await _boundedBytes(
+          requestStream,
+          _positive(mirror.sendTimeout, const Duration(seconds: 8)),
+        );
+      }
+      if (abort.isCompleted) return await ready.future;
+      Future<void> send(int index, RequestOptions options) async {
+        final attempt = attempts[index];
+        try {
+          final response =
+              await (index == 0
+                      ? _fallback.fetch(
+                          options,
+                          body == null ? null : Stream.value(body),
+                          attempt.future,
+                        )
+                      : fetch(
+                          options,
+                          body == null ? null : Stream.value(body),
+                          attempt.future,
+                        ))
+                  .then((response) async {
+                    if (response.statusCode < 200 ||
+                        response.statusCode >= 300) {
+                      await response.stream.listen((_) {}).cancel();
+                      throw DioException.badResponse(
+                        statusCode: response.statusCode,
+                        requestOptions: options,
+                        response: Response(
+                          requestOptions: options,
+                          statusCode: response.statusCode,
+                        ),
+                      );
+                    }
+                    final bytes = await _boundedBytes(
+                      response.stream,
+                      _positive(options.receiveTimeout, _config.receiveTimeout),
+                    );
+                    // Public catalog routes return JSON, never HTML challenges.
+                    final path = options.uri.path;
+                    final valid = bytes.length > 64 * 1024
+                        ? await Isolate.run(
+                            () => _validCatalogDocument(bytes, path),
+                          )
+                        : _validCatalogDocument(bytes, path);
+                    if (!valid) {
+                      throw const FormatException(
+                        'Invalid Bangumi catalog document',
+                      );
+                    }
+                    return ResponseBody(
+                      Stream.value(bytes),
+                      response.statusCode,
+                      headers: response.headers,
+                      statusMessage: response.statusMessage,
+                      isRedirect: response.isRedirect,
+                    );
+                  })
+                  .timeout(
+                    _positive(options.connectTimeout, _config.connectTimeout) +
+                        _positive(
+                          options.receiveTimeout,
+                          _config.receiveTimeout,
+                        ),
+                  );
+          if (ready.isCompleted || abort.isCompleted) return;
+          ready.complete(response);
+          // Cancels the other route's socket, body read and ECH discovery.
+          final loser = attempts[1 - index];
+          if (!loser.isCompleted) loser.complete();
+        } catch (error, stack) {
+          if (!attempt.isCompleted) attempt.complete();
+          if (++failed == 2 && !ready.isCompleted) {
+            ready.completeError(_mapError(error, stack, mirror), stack);
+          }
+        }
+      }
+
+      unawaited(send(0, mirror));
+      unawaited(send(1, official));
+      return await ready.future;
+    } finally {
+      _races.remove(abort);
+      if (!abort.isCompleted) abort.complete();
+      for (final attempt in attempts) {
+        if (!attempt.isCompleted) attempt.complete();
+      }
+    }
+  }
+
+  static Future<Uint8List> _boundedBytes(
+    Stream<Uint8List> stream,
+    Duration timeout,
+  ) async {
+    final bytes = BytesBuilder(copy: false);
+    await for (final chunk in stream.timeout(timeout)) {
+      if (bytes.length + chunk.length > 8 * 1024 * 1024) {
+        throw const FormatException('Bangumi response exceeds 8 MiB');
+      }
+      bytes.add(chunk);
+    }
+    return bytes.takeBytes();
+  }
+
+  static bool _validCatalogDocument(Uint8List bytes, String path) {
+    final data = jsonDecode(utf8.decode(bytes));
+    if (path.endsWith('/episodes') ||
+        path.contains('/search/') ||
+        path == '/p1/trending/subjects') {
+      return data is Map && data['data'] is List && data['total'] is num;
+    }
+    if (RegExp(r'^/(p1|v0)/subjects/\d+$').hasMatch(path)) {
+      return data is Map && data['id'] is num;
+    }
+    return data is Map || data is List;
+  }
+
   Stream<Uint8List> _responseStream(
     Stream<List<int>> stream,
     RequestOptions options,
@@ -231,7 +375,8 @@ class BangumiEchAdapter implements HttpClientAdapter {
         stackTrace: stack,
       );
     }
-    if (error is EchException && error.nativeCode == 28) {
+    if (error is TimeoutException ||
+        error is EchException && error.nativeCode == 28) {
       return DioException.receiveTimeout(
         requestOptions: options,
         timeout: options.receiveTimeout ?? _config.receiveTimeout,
@@ -260,6 +405,14 @@ class BangumiEchAdapter implements HttpClientAdapter {
   @override
   void close({bool force = false}) {
     _closed = true;
+    if (force) {
+      for (final race in _races) {
+        if (!race.isCompleted) race.complete();
+      }
+      for (final request in _activeRequests.toList()) {
+        if (!request.isCompleted) request.complete();
+      }
+    }
     _fallback.close(force: force);
     if (force || _activeRequests.isEmpty) _closeClients();
   }

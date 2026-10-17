@@ -132,8 +132,7 @@ void main() {
     await started.future;
     expect(GStorage.getSetting(SettingsKeys.bangumiAccessToken), 'saved-token');
     await BangumiClient.instance.get('https://api.bgm.tv/v0/subjects/1');
-    expect(
-        adapter.requests.last.headers['Authorization'], 'Bearer saved-token');
+    expect(adapter.requests.last.headers.containsKey('Authorization'), isFalse);
     response.complete(_user('replacement-user'));
     await saving;
     expect(GStorage.getSetting(SettingsKeys.bangumiAccessToken),

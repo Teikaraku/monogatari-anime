@@ -2,6 +2,7 @@ import 'package:kazumi/services/logging/logger.dart';
 import 'package:kazumi/request/config/api_endpoints.dart';
 import 'package:kazumi/utils/constants.dart';
 import 'package:kazumi/request/clients/bangumi_client.dart';
+import 'package:kazumi/request/apis/main_episode_cache.dart';
 import 'package:kazumi/request/core/network_exception.dart';
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/modules/bangumi/bangumi_relation.dart';
@@ -65,9 +66,10 @@ class BangumiApi {
   /// the weekday of its first broadcast (index 0 = Monday). Past seasons have
   /// no Bangumi calendar, so this searches by air date instead.
   static Future<List<List<BangumiItem>>> getSeasonCalendar(
-      List<String> dateRange) async {
-    // The search caps pages at 20 whatever the limit asks for.
-    const pageSize = 20;
+    List<String> dateRange,
+  ) async {
+    // The p1 search supports 100 items per page, avoiding serial small pages.
+    const pageSize = 100;
     // Guards against an absurd reported total.
     const maxPerPlatform = 600;
     // Search accepts plain dates; DateTime.toString() adds a time part.
@@ -76,15 +78,16 @@ class BangumiApi {
     Future<Map<String, dynamic>> page(String platform, int offset) async {
       final jsonData = await _client.post(
         ApiEndpoints.formatUrl(
-            ApiEndpoints.bangumiAPIDomain + ApiEndpoints.bangumiRankSearch,
-            [pageSize, offset]),
+          ApiEndpoints.bangumiAPINextDomain + ApiEndpoints.bangumiSearchNext,
+          [pageSize, offset],
+        ),
         data: <String, dynamic>{
           'keyword': '',
           'sort': 'heat',
           'filter': {
             'type': [2],
-            'meta_tags': [platform],
-            'air_date': ['>=${day(dateRange[0])}', '<${day(dateRange[1])}'],
+            'metaTags': [platform],
+            'date': ['>=${day(dateRange[0])}', '<${day(dateRange[1])}'],
             'nsfw': false,
           },
         },
@@ -136,15 +139,16 @@ class BangumiApi {
       'sort': 'heat',
       'filter': {
         'type': [2],
-        'meta_tags': [metaTag],
+        'metaTags': [metaTag],
         'nsfw': false,
       },
     };
     try {
       final jsonData = await _client.post(
         ApiEndpoints.formatUrl(
-            ApiEndpoints.bangumiAPIDomain + ApiEndpoints.bangumiRankSearch,
-            [limit, offset]),
+          ApiEndpoints.bangumiAPINextDomain + ApiEndpoints.bangumiSearchNext,
+          [limit, offset],
+        ),
         data: params,
       );
       final jsonList = jsonData['data'];
@@ -215,7 +219,7 @@ class BangumiApi {
       if (metaTags.isNotEmpty) "meta_tags": metaTags,
       "tag": userTags,
       "rank": rankFilter,
-      "nsfw": false
+      "nsfw": false,
     };
 
     if (dateRange?.isValid == true) {
@@ -236,18 +240,50 @@ class BangumiApi {
     };
   }
 
-  static Future<BangumiSearchPage?> bangumiSearch(String keyword,
-      {List<String> tags = const [],
-      int limit = 20,
-      int offset = 0,
-      String sort = 'heat',
-      SearchDateRange? dateRange,
-      SearchIntRange? rankRange,
-      SearchDoubleRange? scoreRange,
-      List<int> weekdays = const []}) async {
+  /// p1 uses different field names; weekday filtering is applied locally
+  /// because its search schema has no weekday filter.
+  static Map<String, dynamic> buildBangumiNextSearchParams(
+    String keyword, {
+    List<String> tags = const [],
+    String sort = 'heat',
+    SearchDateRange? dateRange,
+    SearchIntRange? rankRange,
+    SearchDoubleRange? scoreRange,
+    List<int> weekdays = const [],
+  }) {
+    final params = buildBangumiSearchParams(
+      keyword,
+      tags: tags,
+      sort: sort,
+      dateRange: dateRange,
+      rankRange: rankRange,
+      scoreRange: scoreRange,
+    );
+    final filter = params['filter'] as Map<String, dynamic>;
+    filter['tags'] = filter.remove('tag');
+    if (filter.containsKey('meta_tags')) {
+      filter['metaTags'] = filter.remove('meta_tags');
+    }
+    if (filter.containsKey('air_date')) {
+      filter['date'] = filter.remove('air_date');
+    }
+    return params;
+  }
+
+  static Future<BangumiSearchPage?> bangumiSearch(
+    String keyword, {
+    List<String> tags = const [],
+    int limit = 20,
+    int offset = 0,
+    String sort = 'heat',
+    SearchDateRange? dateRange,
+    SearchIntRange? rankRange,
+    SearchDoubleRange? scoreRange,
+    List<int> weekdays = const [],
+  }) async {
     List<BangumiItem> bangumiList = [];
 
-    final params = buildBangumiSearchParams(
+    final params = buildBangumiNextSearchParams(
       keyword,
       tags: tags,
       sort: sort,
@@ -260,8 +296,9 @@ class BangumiApi {
     try {
       final jsonData = await _client.post(
         ApiEndpoints.formatUrl(
-            ApiEndpoints.bangumiAPIDomain + ApiEndpoints.bangumiRankSearch,
-            [limit, offset]),
+          ApiEndpoints.bangumiAPINextDomain + ApiEndpoints.bangumiSearchNext,
+          [limit, offset],
+        ),
         data: params,
       );
       final jsonList = jsonData['data'];
@@ -269,7 +306,10 @@ class BangumiApi {
         if (jsonItem is Map<String, dynamic>) {
           try {
             BangumiItem bangumiItem = BangumiItem.fromJson(jsonItem);
-            if (bangumiItem.nameCn != '') {
+            if (bangumiItem.nameCn != '' &&
+                (weekdays.isEmpty ||
+                    bangumiItem.airDate.isNotEmpty &&
+                        weekdays.contains(bangumiItem.airWeekday))) {
               bangumiList.add(bangumiItem);
             }
           } catch (e) {
@@ -344,17 +384,12 @@ class BangumiApi {
 
   static Future<EpisodeInfo> getBangumiEpisodeByID(int id, int episode) async {
     EpisodeInfo episodeInfo = EpisodeInfo.fromTemplate();
-    var params = <String, dynamic>{
-      'subject_id': id,
-      'offset': episode - 1,
-      'limit': 1
-    };
     try {
-      final jsonData = await _client.get(
-        ApiEndpoints.bangumiAPIDomain + ApiEndpoints.bangumiEpisodeByID,
-        queryParameters: params,
+      final episodes = await MainEpisodeCache.get(id);
+      episodeInfo = episodes.firstWhere(
+        (item) => item.displayNumber == episode,
+        orElse: EpisodeInfo.fromTemplate,
       );
-      episodeInfo = EpisodeInfo.fromJson(jsonData['data'][0]);
     } catch (e) {
       KazumiLogger().e('Network: resolve bangumi episode failed', error: e);
     }
@@ -384,18 +419,22 @@ class BangumiApi {
     List<EpisodeInfo> episodeList, {
     int? type,
   }) async {
-    const int limit = 100;
+    const int limit = 1000;
     int offset = 0;
     int? total;
+    num? firstMainSort;
+    int? firstMainDisc;
     do {
       final params = <String, dynamic>{
-        'subject_id': id,
         'type': ?type,
         'offset': offset,
         'limit': limit,
       };
       final jsonData = await _client.get(
-        ApiEndpoints.bangumiAPIDomain + ApiEndpoints.bangumiEpisodeByID,
+        ApiEndpoints.formatUrl(
+          ApiEndpoints.bangumiAPINextDomain + ApiEndpoints.bangumiEpisodesNext,
+          [id],
+        ),
         queryParameters: params,
       );
       total ??= jsonData['total'] as int?;
@@ -403,11 +442,33 @@ class BangumiApi {
       if (data.isEmpty) {
         break;
       }
-      episodeList.addAll(data
-          .whereType<Map<String, dynamic>>()
-          .map((jsonItem) => EpisodeInfo.fromJson(jsonItem)));
+      for (final jsonItem in data.whereType<Map<String, dynamic>>()) {
+        final episode = EpisodeInfo.fromJson(jsonItem);
+        if (episode.type == 0) {
+          final disc = (jsonItem['disc'] as num?)?.toInt() ?? 0;
+          if (firstMainDisc == null ||
+              disc < firstMainDisc ||
+              disc == firstMainDisc && episode.episode < firstMainSort!) {
+            firstMainDisc = disc;
+            firstMainSort = episode.episode;
+          }
+        }
+        // Some upstream versions ignore type=0. Paginate by the raw count,
+        // but never put OP/ED/SP in the main-episode list.
+        if (type == null || episode.type == type) episodeList.add(episode);
+      }
       offset += data.length;
     } while (total == null || offset < total);
+    // p1 omits v0's computed ep field. Preserve the same in-season numbering
+    // so continuations (sort 13 -> ep 1) still match playback and watch marks.
+    final first = firstMainSort;
+    if (first != null) {
+      for (final episode in episodeList) {
+        if (episode.type == 0 && episode.seasonEpisode <= 0) {
+          episode.seasonEpisode = episode.episode - first + 1;
+        }
+      }
+    }
   }
 
   static Future<EpisodeCommentResponse> getBangumiCommentsByEpisodeID(
@@ -498,13 +559,11 @@ class BangumiApi {
       Future<Map> fetchPageData(int offset, int pageLimit) async {
         await rateLimiter.acquire();
         final url = ApiEndpoints.formatUrl(
-            ApiEndpoints.bangumiAuthAPIMirrorDomain +
-                ApiEndpoints.bangumiGetAllCollections,
-            [username, pageLimit, offset]);
-        final jsonData = await _client.get(
-          url,
-          requiresAuth: true,
+          ApiEndpoints.bangumiAuthAPIMirrorDomain +
+              ApiEndpoints.bangumiGetAllCollections,
+          [username, pageLimit, offset],
         );
+        final jsonData = await _client.get(url, requiresAuth: true);
         if (jsonData is! Map || jsonData['data'] is! List) {
           KazumiLogger().e(
             'BangumiApi: invalid collection response format at offset=$offset',

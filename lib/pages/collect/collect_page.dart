@@ -45,7 +45,8 @@ class CollectPage extends StatefulWidget {
   State<CollectPage> createState() => _CollectPageState();
 }
 
-class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
+class _CollectPageState extends State<CollectPage>
+    with KazumiDialogOwner, WidgetsBindingObserver {
   static const _syncSettings = [
     SettingsKeys.webDavEnable,
     SettingsKeys.webDavEnableCollect,
@@ -74,6 +75,7 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
   final Set<int> _airingRequested = {};
   final List<int> _airingQueue = [];
   int _airingRunning = 0;
+  Timer? _broadcastTimer;
 
   CollectSyncPlan get _syncPlan => CollectSyncPlan(
     webDavEnabled: GStorage.getSetting(SettingsKeys.webDavEnable),
@@ -103,6 +105,13 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _broadcastTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted &&
+          WidgetsBinding.instance.lifecycleState != AppLifecycleState.paused) {
+        setState(() {});
+      }
+    });
     _layout = CollectLayout.fromValue(
       GStorage.getSetting(SettingsKeys.defaultCollectLayout),
     );
@@ -122,8 +131,15 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _broadcastTimer?.cancel();
     _syncSettingsSubscription?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) setState(() {});
   }
 
   void _changeLayout(CollectLayout layout) {
@@ -162,6 +178,7 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
   }
 
   Map<int, CollectProgress> _progress(List<History> histories) {
+    final now = DateTime.now();
     final latest = <int, History>{};
     for (final history in histories) {
       final id = history.bangumiItem.id;
@@ -193,8 +210,17 @@ class _CollectPageState extends State<CollectPage> with KazumiDialogOwner {
     for (final entry in collectController.collectibles) {
       final id = entry.bangumiItem.id;
       final history = latest[id];
-      final airing = _airing[id];
       final slot = _airtimes[id];
+      final storedAiring = _airing[id];
+      final airing = storedAiring == null
+          ? null
+          : AiringSummary.of(
+              storedAiring.episodes,
+              plannedTotal: storedAiring.total,
+              today: now,
+              slot: slot,
+              requireBroadcastTime: true,
+            );
       final marks = marked[id];
       final lastWatched = marks == null
           ? null

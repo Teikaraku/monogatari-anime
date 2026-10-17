@@ -104,7 +104,7 @@ class _NetworkMirrorSettingsState extends State<NetworkMirrorSettings> {
                     title: Text(label(mode)),
                     subtitle: Text(
                       description(mode),
-                      maxLines: 1,
+                      maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
@@ -124,7 +124,7 @@ extension on BangumiAcceleration {
   String get description => switch (this) {
     BangumiAcceleration.direct => '访问官方接口',
     BangumiAcceleration.ech => '启用加密握手',
-    BangumiAcceleration.mirror => '镜像接口（默认）',
+    BangumiAcceleration.mirror => '镜像与官方并行，采用先返回的数据（默认）',
   };
 }
 

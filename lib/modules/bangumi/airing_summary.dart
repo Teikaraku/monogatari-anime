@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:kazumi/modules/bangumi/episode_item.dart';
+import 'package:kazumi/modules/bangumi/broadcast_slot.dart';
 
 enum AiringState { upcoming, airing, finished, unknown }
 
@@ -21,17 +22,55 @@ class AiringSummary {
     List<EpisodeInfo> source, {
     int plannedTotal = 0,
     required DateTime today,
+    BroadcastSlot? slot,
+    bool requireBroadcastTime = false,
   }) {
     final day = DateTime(today.year, today.month, today.day);
     final episodes = [...source]
       ..sort((a, b) => a.episode.compareTo(b.episode));
     final total = math.max(plannedTotal, episodes.length);
-    final aired = episodes
-        .where((e) => e.airDay != null && !e.airDay!.isAfter(day))
-        .toList();
+    // Bangumi episode dates describe Japanese broadcasts, regardless of the
+    // device's timezone. bangumi-data provides the actual UTC start time.
+    final dated = episodes.where((e) => e.airDay != null).toList();
+    final japanStart = slot?.start.toUtc().add(const Duration(hours: 9));
+    var dayShift = 0;
+    if (japanStart != null && dated.isNotEmpty) {
+      final first = dated.first.airDay!;
+      final difference = DateTime.utc(
+        japanStart.year,
+        japanStart.month,
+        japanStart.day,
+      ).difference(DateTime.utc(first.year, first.month, first.day)).inDays;
+      // Late-night broadcasts can have a nominal date one day earlier.
+      if (difference.abs() <= 1) dayShift = difference;
+    }
+    bool hasAired(EpisodeInfo episode) {
+      final airDay = episode.airDay;
+      if (airDay == null) return false;
+      if (slot == null && !requireBroadcastTime) return !airDay.isAfter(day);
+      final cutoff = japanStart == null
+          // A date alone cannot establish that a show airing later today is
+          // already available. Wait until that Japanese calendar day ends.
+          ? DateTime.utc(
+              airDay.year,
+              airDay.month,
+              airDay.day + 1,
+            ).subtract(const Duration(hours: 9))
+          : DateTime.utc(
+              airDay.year,
+              airDay.month,
+              airDay.day + dayShift,
+              japanStart.hour,
+              japanStart.minute,
+              japanStart.second,
+            ).subtract(const Duration(hours: 9));
+      return !today.toUtc().isBefore(cutoff);
+    }
+
+    final aired = episodes.where(hasAired).toList();
     EpisodeInfo? next;
     for (final episode in episodes) {
-      if (episode.airDay != null && episode.airDay!.isAfter(day)) {
+      if (episode.airDay != null && !hasAired(episode)) {
         next = episode;
         break;
       }
