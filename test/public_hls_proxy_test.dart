@@ -7,6 +7,41 @@ import 'package:kazumi/services/api_video/public_hls_proxy.dart';
 
 void main() {
   test(
+    'an initial gateway failure reconnects before failing the player',
+    () async {
+      final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      var requests = 0;
+      origin.listen((request) async {
+        if (++requests == 1) {
+          request.response.statusCode = 502;
+        } else {
+          request.response.write('#EXTM3U\n#EXT-X-ENDLIST\n');
+        }
+        await request.response.close();
+      });
+      final relay = PublicHlsProxy(
+        source: Uri.parse('http://127.0.0.1:${origin.port}/index.m3u8'),
+        client: HttpClient(),
+        allowUri: (uri) => uri.host == '127.0.0.1' && uri.port == origin.port,
+      );
+      final client = HttpClient();
+      try {
+        await relay.start();
+        final response = await (await client.getUrl(relay.uri)).close();
+        expect(response.statusCode, 200);
+        expect(
+          await response.transform(utf8.decoder).join(),
+          contains('#EXTM3U'),
+        );
+        expect(requests, 2);
+      } finally {
+        client.close(force: true);
+        await relay.close();
+        await origin.close(force: true);
+      }
+    },
+  );
+  test(
     'a bounded seek range finishes before unrelated segment bytes arrive and leaves the shared fetch usable',
     () async {
       final origin = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);

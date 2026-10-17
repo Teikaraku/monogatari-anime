@@ -28,19 +28,19 @@ void main() {
           throwsA(isA<ApiVideoUnavailableException>()),
         );
       }
-      expect(calls, 3);
+      expect(calls, 6); // Three providers, one reconnect each, then cooldown.
       now = now.add(const Duration(seconds: 16));
       await expectLater(
         api.loadCatalog(fixture.subject(name: '作品三')),
         throwsA(isA<ApiVideoUnavailableException>()),
       );
-      expect(calls, 6);
+      expect(calls, 12);
       api.clearCache();
       await expectLater(
         api.loadCatalog(fixture.subject(name: '作品三')),
         throwsA(isA<ApiVideoUnavailableException>()),
       );
-      expect(calls, 9);
+      expect(calls, 18);
     },
   );
   test('a sole namesake from the wrong year is never selected', () async {

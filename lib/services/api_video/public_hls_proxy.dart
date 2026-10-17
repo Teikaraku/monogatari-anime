@@ -107,6 +107,27 @@ class PublicHlsProxy {
   }
 
   Future<HttpClientResponse> _get(Uri uri, {String? range}) async {
+    for (var attempt = 0; ; attempt++) {
+      try {
+        final response = await _getOnce(uri, range: range);
+        if (attempt == 0 &&
+            const {500, 502, 504}.contains(response.statusCode)) {
+          await response.listen((_) {}).cancel();
+        } else {
+          return response;
+        }
+      } on IOException catch (error) {
+        // No bytes have reached the decoder yet, so reconnecting is safe.
+        // TLS/certificate and policy failures must retain their real cause.
+        if (attempt != 0 || error is TlsException || _closed) rethrow;
+      } on TimeoutException {
+        if (attempt != 0 || _closed) rethrow;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+    }
+  }
+
+  Future<HttpClientResponse> _getOnce(Uri uri, {String? range}) async {
     for (var redirects = 0; redirects <= 4; redirects++) {
       if (_closed) throw const HttpException('Playback closed');
       if (!_allowUri(uri)) throw const FormatException('片源重定向到不安全地址');

@@ -38,7 +38,7 @@ class ImageFileService extends FileService {
   }) async {
     if (_closed) throw StateError('Image file service is closed');
     final mode = _acceleration();
-    var uri = Uri.parse(url);
+    var uri = BangumiImageUrlRewriter.originalImage(Uri.parse(url));
     if (mode == ImageAcceleration.ech &&
         BangumiImageUrlRewriter.isBangumiImage(uri)) {
       return _echService.get(

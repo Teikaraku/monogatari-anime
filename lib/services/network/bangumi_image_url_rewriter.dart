@@ -9,12 +9,21 @@ abstract final class BangumiImageUrlRewriter {
 
   static Uri rewrite(Uri uri) {
     if (!isBangumiImage(uri)) return uri;
+    uri = originalImage(uri);
 
     final path = uri.host == 'lain.bgm.tv' ? '/img${uri.path}' : uri.path;
-    return _relay.replace(
-      path: path,
-      query: uri.hasQuery ? uri.query : null,
+    return _relay.replace(path: path, query: uri.hasQuery ? uri.query : null);
+  }
+
+  /// The new `/r/<size>/` image processor can stall even when the original
+  /// static image is fast. Cache the original and let the UI resize it.
+  static Uri originalImage(Uri uri) {
+    if (uri.host != 'lain.bgm.tv' || !_isHttp(uri)) return uri;
+    final path = uri.path.replaceFirst(
+      RegExp(r'^/r/\d+(?:x\d+)?(?=/pic/(?:cover|crt)/)'),
+      '',
     );
+    return uri.replace(scheme: 'https', path: path);
   }
 
   static bool _isHttp(Uri uri) => uri.scheme == 'http' || uri.scheme == 'https';

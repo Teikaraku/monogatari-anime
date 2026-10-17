@@ -10,6 +10,45 @@ import 'package:kazumi/request/core/bangumi_transport.dart';
 import 'package:kazumi/request/core/network_config.dart';
 
 void main() {
+  test(
+    'large calendar JSON validates in a worker without capturing requests',
+    () async {
+      final document = {
+        for (var day = 1; day <= 7; day++)
+          '$day': [
+            {
+              'subject': {'id': day, 'name': '番剧' * 5000},
+            },
+          ],
+      };
+      final body = jsonEncode(document);
+      expect(utf8.encode(body).length, greaterThan(64 * 1024));
+      final dio = _publicDio(
+        _CallbackAdapter(
+          (options, stream, cancel) async => ResponseBody.fromString(
+            body,
+            200,
+            headers: {
+              'content-type': ['application/json'],
+            },
+          ),
+        ),
+        MockClient((_) async => http.Response('{}', 200)),
+      );
+      try {
+        final response = await dio.get(
+          'https://bgm.monogatari.top/p1/calendar',
+          options: Options(
+            extra: {'bangumiOriginalApi': 'https://next.bgm.tv/p1/calendar'},
+          ),
+        );
+        expect(response.data, document);
+      } finally {
+        dio.close(force: true);
+      }
+    },
+  );
+
   test('public requests race the mirror and original API', () async {
     final fallback = _FailedAdapter();
     final visited = <Uri>[];

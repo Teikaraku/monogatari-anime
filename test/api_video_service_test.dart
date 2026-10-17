@@ -53,6 +53,79 @@ Map<String, dynamic> document(List<Map<String, dynamic>> rows) => {
 };
 
 void main() {
+  test('an API error containing an empty list is not reported as no resources', () async {
+    final service = ApiVideoService(transport: (_, _) async => {'code': 0, 'list': []});
+    await expectLater(service.loadCatalog(subject()), throwsA(
+      isA<ApiVideoUnavailableException>().having((e) => e.failure,
+        'failure', ApiVideoFailure.invalidResponse)));
+  });
+  test(
+    'a transient first connection failure reconnects without manual retry',
+    () async {
+      final calls = <String, int>{};
+      final service = ApiVideoService(
+        transport: (uri, token) async {
+          final count = calls.update(uri.host, (n) => n + 1, ifAbsent: () => 1);
+          if (count == 1) {
+            throw DioException.connectionError(
+              requestOptions: RequestOptions(path: uri.toString()),
+              reason: 'reset',
+            );
+          }
+          return document([row()]);
+        },
+      );
+      final catalog = await service.loadCatalog(subject());
+      expect(catalog.provider, ApiVideoProvider.zy1080);
+      expect(calls['api.yzzy-api.com'], 2);
+    },
+  );
+
+  test('confirmed empty results are not retried as network failures', () async {
+    var calls = 0;
+    final service = ApiVideoService(
+      transport: (_, _) async {
+        calls++;
+        return document([]);
+      },
+    );
+    await expectLater(
+      service.loadCatalog(subject()),
+      throwsA(isA<ApiVideoUnavailableException>()),
+    );
+    expect(calls, 3);
+  });
+
+  test(
+    'cancellation during reconnect delay prevents another request',
+    () async {
+      final token = CancelToken();
+      var calls = 0;
+      final service = ApiVideoService(
+        transport: (uri, _) async {
+          calls++;
+          scheduleMicrotask(() => token.cancel('leave player'));
+          throw DioException.connectionError(
+            requestOptions: RequestOptions(path: uri.toString()),
+            reason: 'reset',
+          );
+        },
+      );
+      await expectLater(
+        service.loadCatalog(subject(), cancelToken: token),
+        throwsA(
+          isA<DioException>().having(
+            (e) => e.type,
+            'type',
+            DioExceptionType.cancel,
+          ),
+        ),
+      );
+      final cancelledCalls = calls;
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+      expect(calls, cancelledCalls);
+    },
+  );
   test(
     'a slow spelling cannot delay an exact translated title, and loser queries are cancelled',
     () async {

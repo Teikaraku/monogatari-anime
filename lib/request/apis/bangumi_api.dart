@@ -58,75 +58,95 @@ class BangumiApi {
     return bangumiCalendar;
   }
 
-  /// Broadcast types a past season's timetable lists; films and OVAs are
-  /// one-offs, not weekly shows.
-  static const _seasonPlatforms = ['TV', 'WEB'];
-
-  /// Every TV and web series that premiered within [dateRange], grouped by
-  /// the weekday of its first broadcast (index 0 = Monday). Past seasons have
-  /// no Bangumi calendar, so this searches by air date instead.
+  /// Browse uses the authoritative year/month index. The upstream search
+  /// service currently returns empty results for otherwise valid date filters.
   static Future<List<List<BangumiItem>>> getSeasonCalendar(
     List<String> dateRange,
   ) async {
-    // The p1 search supports 100 items per page, avoiding serial small pages.
-    const pageSize = 100;
-    // Guards against an absurd reported total.
-    const maxPerPlatform = 600;
-    // Search accepts plain dates; DateTime.toString() adds a time part.
-    String day(String value) => value.length >= 10 ? value.substring(0, 10) : value;
-
-    Future<Map<String, dynamic>> page(String platform, int offset) async {
-      final jsonData = await _client.post(
-        ApiEndpoints.formatUrl(
-          ApiEndpoints.bangumiAPINextDomain + ApiEndpoints.bangumiSearchNext,
-          [pageSize, offset],
-        ),
-        data: <String, dynamic>{
-          'keyword': '',
-          'sort': 'heat',
-          'filter': {
-            'type': [2],
-            'metaTags': [platform],
-            'date': ['>=${day(dateRange[0])}', '<${day(dateRange[1])}'],
-            'nsfw': false,
-          },
-        },
+    final start = DateTime.parse(dateRange[0]);
+    final end = DateTime.parse(dateRange[1]);
+    final months = <DateTime>[];
+    for (
+      var month = DateTime(start.year, start.month);
+      month.isBefore(end);
+      month = DateTime(month.year, month.month + 1)
+    ) {
+      months.add(month);
+    }
+    final jobs = [
+      for (final month in months)
+        for (final cat in [1, 5]) (month, cat),
+    ];
+    final rows = <dynamic>[];
+    // Bound concurrency across all months and pages.
+    for (var i = 0; i < jobs.length; i += 3) {
+      final batch = await Future.wait(
+        jobs.skip(i).take(3).map((job) async {
+          final result = <dynamic>[];
+          var pages = 1;
+          for (var page = 1; page <= pages; page++) {
+            final response = await _client.get(
+              '${ApiEndpoints.bangumiAPINextDomain}/p1/subjects',
+              queryParameters: {
+                'type': 2,
+                'sort': 'date',
+                'cat': job.$2,
+                'year': job.$1.year,
+                'month': job.$1.month,
+                'page': page,
+              },
+            );
+            if (response is! Map ||
+                response['data'] is! List ||
+                response['total'] is! num) {
+              throw const FormatException('Invalid Bangumi season response');
+            }
+            pages = (response['total'] as num).toInt(); // total pages, not rows
+            if (pages > 100) {
+              throw const FormatException('Too many season pages');
+            }
+            result.addAll(response['data'] as List);
+          }
+          return result;
+        }),
       );
-      return Map<String, dynamic>.from(jsonData as Map);
+      rows.addAll(batch.expand((items) => items));
     }
-
-    // The first page gives the total; the rest are fetched together.
-    Future<List<dynamic>> platformItems(String platform) async {
-      final first = await page(platform, 0);
-      final total =
-          ((first['total'] as num?)?.toInt() ?? 0).clamp(0, maxPerPlatform);
-      final rest = await Future.wait([
-        for (var offset = pageSize; offset < total; offset += pageSize)
-          page(platform, offset),
-      ]);
-      return [
-        ...(first['data'] as List? ?? const []),
-        for (final response in rest) ...(response['data'] as List? ?? const []),
-      ];
-    }
-
-    final pages =
-        await Future.wait(_seasonPlatforms.map(platformItems));
     final seen = <int>{};
-    final items = <BangumiItem>[];
-    for (final jsonItem in pages.expand((list) => list)) {
-      if (jsonItem is! Map<String, dynamic>) continue;
-      try {
-        final item = BangumiItem.fromJson(jsonItem);
-        if (item.airDate.isNotEmpty && seen.add(item.id)) items.add(item);
-      } catch (e) {
-        KazumiLogger().w('BangumiApi: skipped malformed season item', error: e);
+    final days = List.generate(7, (_) => <BangumiItem>[]);
+    for (final row in rows.whereType<Map<String, dynamic>>()) {
+      if (row['nsfw'] == true) continue;
+      final item = BangumiItem.fromJson(row);
+      final date = DateTime.tryParse(item.airDate);
+      if (date != null &&
+          !date.isBefore(start) &&
+          date.isBefore(end) &&
+          seen.add(item.id)) {
+        days[item.airWeekday - 1].add(item);
       }
     }
-    return List.generate(
-      7,
-      (index) => items.where((item) => item.airWeekday == index + 1).toList(),
-    );
+    return days;
+  }
+
+  static Future<List<dynamic>> _nextSubjectRows(int id, String path) async {
+    final rows = <dynamic>[];
+    var offset = 0;
+    while (true) {
+      final response = await _client.get(
+        '${ApiEndpoints.bangumiAPINextDomain}/p1/subjects/$id/$path',
+        queryParameters: {'limit': 100, 'offset': offset},
+      );
+      if (response is! Map ||
+          response['data'] is! List ||
+          response['total'] is! num) {
+        throw const FormatException('Invalid Bangumi subject list');
+      }
+      final page = response['data'] as List;
+      rows.addAll(page);
+      offset += page.length;
+      if (page.isEmpty || offset >= (response['total'] as num)) return rows;
+      if (offset >= 10000) throw const FormatException('Too many Bangumi rows');
+    }
   }
 
   /// Anime carrying the Bangumi public tag [metaTag] (an official 类型 such as
@@ -240,8 +260,9 @@ class BangumiApi {
     };
   }
 
-  /// p1 uses different field names; weekday filtering is applied locally
-  /// because its search schema has no weekday filter.
+  /// p1 uses different field names. Date/weekday and exact decimal score
+  /// bounds are applied locally: its current date index rejects valid ranges,
+  /// and its score parser only accepts single-digit integers.
   static Map<String, dynamic> buildBangumiNextSearchParams(
     String keyword, {
     List<String> tags = const [],
@@ -264,8 +285,18 @@ class BangumiApi {
     if (filter.containsKey('meta_tags')) {
       filter['metaTags'] = filter.remove('meta_tags');
     }
-    if (filter.containsKey('air_date')) {
-      filter['date'] = filter.remove('air_date');
+    filter.remove('air_date');
+    filter.remove('rating');
+    if (scoreRange?.isValid == true) {
+      final min = scoreRange!.min;
+      final max = scoreRange.max;
+      final bounds = <String>[
+        if (min != null && min.floor() >= 0 && min.floor() <= 9)
+          '>=${min.floor()}',
+        if (max != null && max.ceil() >= 0 && max.ceil() <= 9)
+          '<=${max.ceil()}',
+      ];
+      if (bounds.isNotEmpty) filter['rating'] = bounds;
     }
     return params;
   }
@@ -307,6 +338,14 @@ class BangumiApi {
           try {
             BangumiItem bangumiItem = BangumiItem.fromJson(jsonItem);
             if (bangumiItem.nameCn != '' &&
+                (dateRange?.isValid != true ||
+                    bangumiItem.airDate.isNotEmpty &&
+                    bangumiItem.airDate.compareTo(dateRange!.start) >= 0 &&
+                    bangumiItem.airDate.compareTo(dateRange.end) < 0) &&
+                (scoreRange?.min == null ||
+                    bangumiItem.ratingScore >= scoreRange!.min!) &&
+                (scoreRange?.max == null ||
+                    bangumiItem.ratingScore <= scoreRange!.max!) &&
                 (weekdays.isEmpty ||
                     bangumiItem.airDate.isNotEmpty &&
                         weekdays.contains(bangumiItem.airWeekday))) {
@@ -352,15 +391,7 @@ class BangumiApi {
   }
 
   static Future<List<BangumiRelation>> getBangumiRelationsByID(int id) async {
-    final jsonData = await _client.get(
-      ApiEndpoints.formatUrl(
-        ApiEndpoints.bangumiAPIDomain + ApiEndpoints.bangumiRelationsByID,
-        [id],
-      ),
-    );
-    if (jsonData is! List) {
-      throw const FormatException('Bangumi relations response must be a list');
-    }
+    final jsonData = await _nextSubjectRows(id, 'relations');
 
     final relations = <BangumiRelation>[];
     for (final jsonItem in jsonData) {
@@ -369,7 +400,11 @@ class BangumiApi {
           throw const FormatException('Bangumi relation must be an object');
         }
         relations.add(
-          BangumiRelation.fromJson(Map<String, dynamic>.from(jsonItem)),
+          BangumiRelation.fromJson({
+            ...Map<String, dynamic>.from(jsonItem['subject'] as Map),
+            'name_cn': jsonItem['subject']['nameCN'],
+            'relation': jsonItem['relation']['cn'],
+          }),
         );
       } catch (e, stackTrace) {
         KazumiLogger().w(
@@ -483,20 +518,39 @@ class BangumiApi {
   }
 
   static Future<StaffResponse> getBangumiStaffByID(int id) async {
-    final jsonData = await _client.get(
-      ApiEndpoints.formatUrl(
-          ApiEndpoints.bangumiAPIDomain + ApiEndpoints.bangumiStaffByID, [id]),
-    );
-    return StaffResponse.fromJson(jsonData);
+    final rows = await _nextSubjectRows(id, 'staffs/persons');
+    return StaffResponse.fromJson([
+      for (final row in rows.whereType<Map>())
+        for (final position in row['positions'] as List? ?? const [])
+          {
+            ...Map<String, dynamic>.from(row['staff'] as Map),
+            'relation': position['type']['cn'] ?? '',
+          },
+    ]);
   }
 
   static Future<CharactersResponse> getCharatersByBangumiID(int id) async {
-    final jsonData = await _client.get(
-      ApiEndpoints.formatUrl(
-          ApiEndpoints.bangumiAPIDomain + ApiEndpoints.bangumiCharacterByID,
-          [id]),
-    );
-    return CharactersResponse.fromJson(jsonData);
+    final rows = await _nextSubjectRows(id, 'characters');
+    return CharactersResponse.fromJson([
+      for (final row in rows.whereType<Map>())
+        {
+          ...Map<String, dynamic>.from(row['character'] as Map),
+          'images': row['character']['images'] ?? <String, dynamic>{},
+          'relation': switch (row['type']) {
+            1 => '主角',
+            2 => '配角',
+            3 => '客串',
+            _ => '未知',
+          },
+          'actors': [
+            for (final cast in row['casts'] as List? ?? const [])
+              {
+                ...Map<String, dynamic>.from(cast['person'] as Map),
+                'images': cast['person']['images'] ?? <String, dynamic>{},
+              },
+          ],
+        },
+    ]);
   }
 
   static Future<CharacterFullItem> getCharacterByCharacterID(int id) async {

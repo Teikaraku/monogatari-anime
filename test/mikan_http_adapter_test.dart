@@ -15,6 +15,7 @@ void main() {
     plain = _PlainAdapter();
     encrypted = _EncryptedClient();
     adapter = MikanHttpAdapter(
+      enablePublicRelay: false,
       fallback: plain,
       proxyForUri: (_) => null,
       createEchClient: () => encrypted,
@@ -24,9 +25,87 @@ void main() {
   tearDown(() => adapter.close(force: true));
 
   test(
+    'public RSS can use a healthy relay and abort a stalled ECH route',
+    () async {
+      encrypted.waitForAbort = true;
+      plain.payload = '<rss><channel></channel></rss>';
+      final combined = MikanHttpAdapter(
+        fallback: plain,
+        proxyForUri: (_) => null,
+        createEchClient: () => encrypted,
+      );
+      addTearDown(() => combined.close(force: true));
+      final response = await combined.fetch(
+        _options('/RSS/Bangumi?bangumiId=4062&subgroupid=583'),
+        null,
+        null,
+      );
+      await response.stream.drain<void>();
+      await Future<void>.delayed(Duration.zero);
+      expect(plain.requests.single.uri.host, 'bgm.monogatari.top');
+      expect(plain.requests.single.uri.path, '/public/mikan/RSS/Bangumi');
+      expect(encrypted.aborted, isTrue);
+    },
+  );
+
+  test('force-close cancels a pending public relay race immediately', () async {
+    encrypted.waitForAbort = true;
+    plain.waitForAbort = true;
+    final combined = MikanHttpAdapter(
+      fallback: plain,
+      proxyForUri: (_) => null,
+      createEchClient: () => encrypted,
+    );
+    final pending = combined.fetch(
+      _options('/RSS/Bangumi?bangumiId=4062'),
+      null,
+      null,
+    );
+    await encrypted.started.future;
+    combined.close(force: true);
+    await expectLater(
+      pending.timeout(const Duration(seconds: 1)),
+      throwsA(
+        isA<DioException>().having(
+          (e) => e.type,
+          'type',
+          DioExceptionType.cancel,
+        ),
+      ),
+    );
+  });
+
+  test('relay is never used for a token feed or configured proxy', () async {
+    final combined = MikanHttpAdapter(
+      fallback: plain,
+      proxyForUri: (_) => null,
+      createEchClient: () => encrypted,
+    );
+    addTearDown(() => combined.close(force: true));
+    await (await combined.fetch(
+      _options('/RSS/MyBangumi?token=secret'),
+      null,
+      null,
+    )).stream.drain<void>();
+    expect(plain.requests, isEmpty);
+    final proxied = MikanHttpAdapter(
+      fallback: plain,
+      proxyForUri: (_) => Uri.parse('http://proxy.test:8080'),
+    );
+    addTearDown(() => proxied.close(force: true));
+    await (await proxied.fetch(
+      _options('/RSS/Bangumi?bangumiId=4062'),
+      null,
+      null,
+    )).stream.drain<void>();
+    expect(plain.requests.single.uri.host, 'mikanani.me');
+  });
+
+  test(
     'configured public API hosts use ECH while other hosts stay on their original transport',
     () async {
       final configured = MikanHttpAdapter(
+        enablePublicRelay: false,
         fallback: plain,
         proxyForUri: (_) => null,
         hosts: const {'bfzyapi.com'},
@@ -54,6 +133,7 @@ void main() {
     encrypted.waitForAbort = true;
     final backup = _EncryptedClient();
     final hedged = MikanHttpAdapter(
+      enablePublicRelay: false,
       fallback: plain,
       proxyForUri: (_) => null,
       createEchClient: () => encrypted,
@@ -76,6 +156,7 @@ void main() {
     encrypted.status = 403;
     final backup = _EncryptedClient();
     final hedged = MikanHttpAdapter(
+      enablePublicRelay: false,
       fallback: plain,
       proxyForUri: (_) => null,
       createEchClient: () => encrypted,
@@ -94,6 +175,7 @@ void main() {
     () async {
       encrypted.stallBody = true;
       final hedged = MikanHttpAdapter(
+        enablePublicRelay: false,
         fallback: plain,
         proxyForUri: (_) => null,
         createEchClient: () => encrypted,
@@ -115,6 +197,7 @@ void main() {
     'oversized encrypted documents are rejected before reaching the parser',
     () async {
       final bounded = MikanHttpAdapter(
+        enablePublicRelay: false,
         fallback: plain,
         proxyForUri: (_) => null,
         createEchClient: () => encrypted,
@@ -151,6 +234,7 @@ void main() {
 
   test('explicit proxy is preserved and never bypassed through ECH', () async {
     final proxied = MikanHttpAdapter(
+      enablePublicRelay: false,
       fallback: plain,
       proxyForUri: (_) => Uri.parse('http://127.0.0.1:7890'),
       createEchClient: () => encrypted,
@@ -256,6 +340,8 @@ RequestOptions _options(String path) => RequestOptions(
 
 class _PlainAdapter implements HttpClientAdapter {
   final requests = <RequestOptions>[];
+  String payload = 'normal HTTPS';
+  bool waitForAbort = false;
 
   @override
   Future<ResponseBody> fetch(
@@ -264,7 +350,14 @@ class _PlainAdapter implements HttpClientAdapter {
     Future<void>? cancelFuture,
   ) async {
     requests.add(options);
-    return ResponseBody.fromString('normal HTTPS', 200);
+    if (waitForAbort) {
+      await cancelFuture;
+      throw DioException.requestCancelled(
+        requestOptions: options,
+        reason: 'closed',
+      );
+    }
+    return ResponseBody.fromString(payload, 200);
   }
 
   @override

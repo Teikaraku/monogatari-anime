@@ -124,7 +124,10 @@ class BangumiItem {
       if (match != null) {
         return '${match[1]}-${match[2]!.padLeft(2, '0')}-${match[3]!.padLeft(2, '0')}';
       }
-      return '';
+      final iso = RegExp(
+        r'(?:^| / )(\d{4}-\d{2}-\d{2})(?: / |$)',
+      ).firstMatch(jsonData['info']?.toString() ?? '');
+      return iso?[1] ?? '';
     }
 
     final String airDateStr = resolveAirDateString(json);
@@ -148,7 +151,7 @@ class BangumiItem {
       images: Map<String, String>.from(
         json['images'] ??
             {
-              "large": json['image'],
+              "large": json['image'] ?? '',
               "common": "",
               "medium": "",
               "small": "",

@@ -119,6 +119,12 @@ class MikanEchResolver implements EchResolver {
   final int addressIndex;
   final Set<String> hosts;
 
+  // The DNS record belongs to crypto.cloudflare.com, not to Mikan/API
+  // origins. Its address hints currently return 502 for these other zones.
+  // These shared Cloudflare edges are also used by the Bangumi transport.
+  // ECH and certificate verification still authenticate the requested host.
+  static const publicEdges = ['104.21.6.61', '172.67.134.140'];
+
   @override
   Future<EchRoute?> resolve(Uri uri) async {
     if (uri.scheme != 'https' || !hosts.contains(uri.host) || uri.port != 443) {
@@ -127,7 +133,10 @@ class MikanEchResolver implements EchResolver {
     final route = await discovery.discover();
     return EchRoute(
       configList: route.configList,
-      addresses: [route.addresses[addressIndex % route.addresses.length]],
+      addresses: [
+        publicEdges[addressIndex % publicEdges.length],
+        ...route.addresses,
+      ],
     );
   }
 }

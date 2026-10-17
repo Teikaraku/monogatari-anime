@@ -12,16 +12,22 @@ class AirtimeApi {
   AirtimeApi._();
 
   static Map<int, BroadcastSlot>? _cache;
+  static Future<Map<int, BroadcastSlot>>? _pending;
 
-  static Future<Map<int, BroadcastSlot>> load() async {
+  static Future<Map<int, BroadcastSlot>> load() {
     final cached = _cache;
-    if (cached != null) return cached;
+    if (cached != null) return Future.value(cached);
+    return _pending ??= _load().whenComplete(() => _pending = null);
+  }
+
+  static Future<Map<int, BroadcastSlot>> _load() async {
     try {
-      final response =
-          await DioFactory.apiDio.get<dynamic>(ApiEndpoints.bangumiAirtime);
+      final response = await DioFactory.apiDio.get<dynamic>(
+        ApiEndpoints.bangumiAirtime,
+      );
       final data = response.data;
       final index = parseAirtimeIndex(data is String ? jsonDecode(data) : data);
-      _cache = index;
+      if (index.isNotEmpty) _cache = index;
       return index;
     } on DioException catch (e) {
       throw await NetworkErrorMapper.mapException(e);

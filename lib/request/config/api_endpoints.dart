@@ -1,4 +1,5 @@
 import 'package:flutter/services.dart' show appBuildName;
+import 'public_origins.dart';
 
 class ApiEndpoints {
   /// 当前版本
@@ -29,7 +30,7 @@ class ApiEndpoints {
       'https://api.github.com/repos/Teikaraku/monogatari-anime/releases/latest';
 
   /// 物语中转：Bangumi 接口、图片与规则仓库
-  static const String bangumiMirrorDomain = 'https://bgm.monogatari.top';
+  static const String bangumiMirrorDomain = publicCatalogOrigin;
 
   /// 番剧播出时间（由服务器每天从 bangumi-data 生成）
   static const String bangumiAirtime =

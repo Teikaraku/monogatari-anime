@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:kazumi/modules/bangumi/bangumi_item.dart';
 import 'package:kazumi/modules/bangumi/broadcast_slot.dart';
 import 'package:kazumi/request/apis/airtime_api.dart';
@@ -49,6 +51,7 @@ abstract class _TimelineController with Store {
 
   /// Broadcast times by subject id; empty until loaded or when unavailable.
   Map<int, BroadcastSlot> airtimes = const {};
+  int _loadGeneration = 0;
 
   Future<void> _loadAirtimes() async {
     try {
@@ -61,6 +64,7 @@ abstract class _TimelineController with Store {
   @action
   Future<void> loadSeason(DateTime date) async {
     if (isLoading) return;
+    final generation = ++_loadGeneration;
     isLoading = true;
     isTimeOut = false;
     final airtimesLoaded = _loadAirtimes();
@@ -70,12 +74,24 @@ abstract class _TimelineController with Store {
       final calendar = isSameSeason(date, DateTime.now())
           ? await BangumiApi.getCalendar()
           : await BangumiApi.getSeasonCalendar(
-              AnimeSeason(date).toSeasonStartAndEnd());
-      // Show the day lists once, already in broadcast order.
-      await airtimesLoaded;
+              AnimeSeason(date).toSeasonStartAndEnd(),
+            );
+      // Broadcast clock metadata is optional; a slow metadata host must not
+      // hide the already downloaded calendar behind the loading indicator.
       bangumiCalendar.addAll(_byBroadcastDay(calendar));
       isTimeOut = bangumiCalendar.every((day) => day.isEmpty);
       if (!isTimeOut) changeSort(_sort);
+      unawaited(
+        airtimesLoaded.then((_) {
+          if (_loadGeneration != generation || isTimeOut) return;
+          runInAction(() {
+            bangumiCalendar
+              ..clear()
+              ..addAll(_byBroadcastDay(calendar));
+            changeSort(_sort);
+          });
+        }),
+      );
     } catch (error, stackTrace) {
       isTimeOut = true;
       KazumiLogger().e('Timeline: loading season failed',

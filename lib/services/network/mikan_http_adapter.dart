@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 import 'package:ech_http/ech_http.dart';
 import 'package:http/http.dart' as http;
 import 'mikan_ech_resolver.dart';
+import 'public_metadata_relay.dart';
 
 /// Mikan's Cloudflare endpoint can be unreachable through polluted DNS or
 /// clear-text TLS SNI even when a browser's encrypted connection works.
@@ -17,6 +18,7 @@ class MikanHttpAdapter implements HttpClientAdapter {
     this.hedgeDelay = const Duration(milliseconds: 250),
     this.hosts = const {'mikanani.me'},
     this.maxResponseBytes = 8 * 1024 * 1024,
+    this.enablePublicRelay = true,
     http.Client Function()? createEchClient,
     http.Client Function()? createSecondaryEchClient,
   }) : _fallback = fallback,
@@ -31,6 +33,7 @@ class MikanHttpAdapter implements HttpClientAdapter {
   final Duration discoveryTimeout;
   final Duration hedgeDelay;
   final int maxResponseBytes;
+  final bool enablePublicRelay;
 
   /// Only explicitly configured Cloudflare hosts use the encrypted transport.
   final Set<String> hosts;
@@ -38,6 +41,7 @@ class MikanHttpAdapter implements HttpClientAdapter {
   http.Client? _secondary;
   MikanEchDiscovery? _discovery;
   final _active = <Completer<void>>{};
+  final _publicRequests = <Completer<void>>{};
   bool _closed = false;
 
   static bool supports(Uri uri) =>
@@ -62,6 +66,49 @@ class MikanHttpAdapter implements HttpClientAdapter {
 
   @override
   Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    if (_closed) throw StateError('Mikan HTTP adapter is closed');
+    final relay = enablePublicRelay && _proxyForUri(options.uri) == null
+        ? publicMetadataRelayUri(options)
+        : null;
+    if (relay != null && hosts.contains(options.uri.host)) {
+      final abort = Completer<void>();
+      _publicRequests.add(abort);
+      cancelFuture?.then((_) {
+        if (!abort.isCompleted) abort.complete();
+      });
+      try {
+        return await racePublicMetadata(
+          request: options,
+          origin: (cancel) => _fetchOrigin(options, requestStream, cancel),
+          relay: (cancel) => _fallback.fetch(
+            options.copyWith(
+              path: relay.toString(),
+              baseUrl: '',
+              queryParameters: {},
+              headers: const {
+                'user-agent': 'Monogatari',
+                'accept-encoding': 'gzip',
+              },
+            ),
+            null,
+            cancel,
+          ),
+          cancelFuture: abort.future,
+          maxBytes: maxResponseBytes,
+        );
+      } finally {
+        _publicRequests.remove(abort);
+        if (!abort.isCompleted) abort.complete();
+      }
+    }
+    return _fetchOrigin(options, requestStream, cancelFuture);
+  }
+
+  Future<ResponseBody> _fetchOrigin(
     RequestOptions options,
     Stream<Uint8List>? requestStream,
     Future<void>? cancelFuture,
@@ -271,6 +318,9 @@ class MikanHttpAdapter implements HttpClientAdapter {
     _closed = true;
     _fallback.close(force: force);
     if (force) {
+      for (final abort in _publicRequests) {
+        if (!abort.isCompleted) abort.complete();
+      }
       for (final abort in _active) {
         if (!abort.isCompleted) abort.complete();
       }

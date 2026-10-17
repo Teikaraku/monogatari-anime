@@ -15,12 +15,17 @@ void main() {
     final filter = params['filter'] as Map;
     expect(filter['metaTags'], ['漫画改']);
     expect(filter['tags'], ['芳文社']);
-    expect(filter['date'], ['>=2023-10-01', '<2024-01-01']);
+    expect(filter.containsKey('date'), isFalse); // Applied to returned rows.
     expect(filter['rank'], ['>=1', '<=1000']);
     expect(filter['nsfw'], false);
     expect(filter.keys, isNot(contains('meta_tags')));
     expect(filter.keys, isNot(contains('air_date')));
     expect(filter.keys, isNot(contains('air_weekday')));
+  });
+  test('p1 uses integer outer score bounds; exact decimals stay local', () {
+    final params = BangumiApi.buildBangumiNextSearchParams('',
+      scoreRange: const SearchDoubleRange(min: 8.2, max: 10.0));
+    expect((params['filter'] as Map)['rating'], ['>=8']);
   });
   group('BangumiApi.buildBangumiSearchParams', () {
     test('keeps default search params compatible', () {

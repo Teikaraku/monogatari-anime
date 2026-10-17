@@ -535,14 +535,25 @@ class ApiVideoService {
     };
     Object? lastError;
     for (final endpoint in endpoints) {
-      try {
-        return await _request(
-          Uri.parse(endpoint).replace(queryParameters: query),
-          token,
-        );
-      } catch (error) {
-        _checkCancelled(token);
-        lastError = error;
+      // One short retry repairs a stale keep-alive connection or transient
+      // gateway failure. It shares the provider's overall deadline and cancel
+      // token; other providers continue concurrently while it reconnects.
+      for (var attempt = 0; attempt < 2; attempt++) {
+        try {
+          return await _request(
+            Uri.parse(endpoint).replace(queryParameters: query),
+            token,
+          );
+        } catch (error) {
+          _checkCancelled(token);
+          lastError = error;
+          if (attempt != 0 || !_canRetryCatalogRequest(error)) break;
+          await Future.any([
+            Future<void>.delayed(const Duration(milliseconds: 150)),
+            token.whenCancel.then<void>((error) => throw error),
+          ]);
+          _checkCancelled(token);
+        }
       }
     }
     throw lastError ?? const ApiVideoUnavailableException();
@@ -608,12 +619,32 @@ class ApiVideoService {
         : raw;
     if (document is! Map) throw const FormatException('资源站未返回 JSON 对象');
     final result = Map<String, dynamic>.from(document);
+    if (result.containsKey('code') && result['code'].toString() != '1') {
+      throw const FormatException('资源站返回查询错误，未能确认资源');
+    }
     if (result['list'] is! List) throw const FormatException('资源站响应缺少列表');
     if ((result['list'] as List).length > 5000) {
       throw const FormatException('资源站条目过多');
     }
     return result;
   }
+}
+
+bool _canRetryCatalogRequest(Object error) {
+  if (error is SocketException || error is TimeoutException) return true;
+  if (error is! DioException) return false;
+  return switch (error.type) {
+    DioExceptionType.connectionTimeout ||
+    DioExceptionType.receiveTimeout ||
+    DioExceptionType.sendTimeout ||
+    DioExceptionType.connectionError => true,
+    DioExceptionType.badResponse => const {
+      500,
+      502,
+      504,
+    }.contains(error.response?.statusCode),
+    _ => false,
+  };
 }
 
 Object? _decodeProviderBytes(Uint8List bytes) =>

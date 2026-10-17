@@ -4,6 +4,7 @@ import 'package:ech_http/ech_http.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:http/http.dart' as http;
 import 'package:kazumi/services/network/bangumi_ech_resolver.dart';
+import 'package:kazumi/services/network/bangumi_image_url_rewriter.dart';
 import 'package:kazumi/services/network/image_file_response.dart';
 import 'package:kazumi/utils/constants.dart' show bangumiHTTPHeader;
 
@@ -44,7 +45,7 @@ class BangumiEchImageService extends FileService {
     Map<String, String>? headers,
   }) async {
     if (_closed) throw StateError('ECH image service is closed');
-    final uri = Uri.parse(url);
+    final uri = BangumiImageUrlRewriter.originalImage(Uri.parse(url));
     final session = _sessionFor(uri);
     session.active++;
     final EchResponse response;

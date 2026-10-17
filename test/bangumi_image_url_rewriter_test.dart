@@ -3,6 +3,23 @@ import 'package:kazumi/services/network/bangumi_image_url_rewriter.dart';
 
 void main() {
   group('BangumiImageUrlRewriter', () {
+    test('bypasses stalled resizing without changing origin or revision', () {
+      for (final kind in ['cover', 'crt']) {
+        final uri = Uri.parse(
+          'https://lain.bgm.tv/r/200/pic/$kind/l/a.jpg?r=123',
+        );
+        expect(
+          BangumiImageUrlRewriter.originalImage(uri).toString(),
+          'https://lain.bgm.tv/pic/$kind/l/a.jpg?r=123',
+        );
+        expect(
+          BangumiImageUrlRewriter.rewrite(uri).toString(),
+          'https://bgm.monogatari.top/img/pic/$kind/l/a.jpg?r=123',
+        );
+      }
+      final other = Uri.parse('https://other.test/r/200/pic/cover/l/a.jpg');
+      expect(BangumiImageUrlRewriter.originalImage(other), other);
+    });
     test('routes lain images through the relay image cache', () {
       expect(
         BangumiImageUrlRewriter.rewrite(

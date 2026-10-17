@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:ech_http/ech_http.dart';
 import 'package:http/http.dart' as http;
 import 'package:kazumi/request/config/api_endpoints.dart';
@@ -270,9 +270,7 @@ class BangumiEchAdapter implements HttpClientAdapter {
                     // Public catalog routes return JSON, never HTML challenges.
                     final path = options.uri.path;
                     final valid = bytes.length > 64 * 1024
-                        ? await Isolate.run(
-                            () => _validCatalogDocument(bytes, path),
-                          )
+                        ? await compute(_validateCatalogPayload, (bytes, path))
                         : _validCatalogDocument(bytes, path);
                     if (!valid) {
                       throw const FormatException(
@@ -335,6 +333,10 @@ class BangumiEchAdapter implements HttpClientAdapter {
 
   static bool _validCatalogDocument(Uint8List bytes, String path) {
     final data = jsonDecode(utf8.decode(bytes));
+    if (path == '/p1/calendar') {
+      return data is Map &&
+          List.generate(7, (i) => '${i + 1}').every((day) => data[day] is List);
+    }
     if (path.endsWith('/episodes') ||
         path.contains('/search/') ||
         path == '/p1/trending/subjects') {
@@ -345,6 +347,11 @@ class BangumiEchAdapter implements HttpClientAdapter {
     }
     return data is Map || data is List;
   }
+
+  // A tear-off and a data-only message keep request completers, streams and
+  // native clients out of the worker isolate's captured context.
+  static bool _validateCatalogPayload((Uint8List, String) payload) =>
+      _validCatalogDocument(payload.$1, payload.$2);
 
   Stream<Uint8List> _responseStream(
     Stream<List<int>> stream,

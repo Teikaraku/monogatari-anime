@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -5,8 +6,11 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
 import 'package:kazumi/request/apis/bangumi_api.dart';
+import 'package:kazumi/pages/timeline/timeline_controller.dart';
+import 'package:kazumi/repositories/collect_repository.dart';
 import 'package:kazumi/request/core/dio_factory.dart';
 import 'package:kazumi/services/storage/storage.dart';
+import 'package:kazumi/utils/search_parser.dart';
 import 'package:logger/logger.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 
@@ -74,6 +78,165 @@ void main() {
       expect(episodes.map((e) => e.nameCn), ['第一话', '第二话']);
       expect(adapter.requests.last.uri.queryParameters['offset'], '2');
       expect(adapter.requests, hasLength(2));
+    },
+  );
+
+  test('calendar retains shows without posters', () async {
+    adapter.response = (_) => {
+      for (var day = 1; day <= 7; day++)
+        '$day': [
+          {
+            'subject': {..._subject, 'id': day, 'images': null},
+          },
+        ],
+    };
+    final days = await BangumiApi.getCalendar();
+    expect(days.map((day) => day.length), List.filled(7, 1));
+    expect(days.first.single.images['large'], '');
+  });
+
+  test('date and decimal score filters retain pagination without broken upstream fields', () async {
+    adapter.response = (request) {
+      expect(request.data['filter'].containsKey('date'), isFalse);
+      expect(request.data['filter']['rating'], ['>=8', '<=9']);
+      return {'total': 3, 'data': [
+        _subject,
+        {..._subject, 'id': 2, 'info': '12话 / 2025-10-08'},
+        {..._subject, 'id': 3, 'rating': {'rank': 2, 'score': 8.1, 'total': 1}},
+      ]};
+    };
+    final page = await BangumiApi.bangumiSearch('番剧',
+      dateRange: const SearchDateRange(start: '2026-10-01', end: '2027-01-01'),
+      scoreRange: const SearchDoubleRange(min: 8.2, max: 8.8));
+    expect(page!.items.map((item) => item.id), [511936]);
+    expect(page.rawCount, 3);
+  });
+
+  test(
+    'calendar is visible while optional broadcast times are stalled',
+    () async {
+      final airtime = Completer<Object>();
+      final metadata = _Adapter()..response = (_) => airtime.future;
+      DioFactory.apiDio.httpClientAdapter.close();
+      DioFactory.apiDio.httpClientAdapter = metadata;
+      adapter.response = (_) => {
+        for (var day = 1; day <= 7; day++)
+          '$day': [
+            {
+              'subject': {..._subject, 'id': day},
+            },
+          ],
+      };
+      final timeline = TimelineController(CollectRepository());
+      try {
+        await timeline
+            .loadSeason(DateTime.now())
+            .timeout(const Duration(seconds: 1));
+        expect(timeline.isLoading, isFalse);
+        expect(timeline.isTimeOut, isFalse);
+        expect(timeline.bangumiCalendar.expand((day) => day), hasLength(7));
+        expect(airtime.isCompleted, isFalse);
+      } finally {
+        airtime.complete({'items': []});
+        await Future<void>.delayed(Duration.zero);
+      }
+    },
+  );
+
+  test(
+    'past season browses all monthly pages and parses ISO premiere dates',
+    () async {
+      adapter.response = (request) {
+        expect(request.method, 'GET');
+        expect(request.uri.path, '/p1/subjects');
+        final q = request.uri.queryParameters;
+        final month = int.parse(q['month']!);
+        final page = int.parse(q['page']!);
+        final cat = int.parse(q['cat']!);
+        return {
+          'total': 2,
+          'data': [
+            {
+              ..._subject,
+              'id': month * 100 + cat * 10 + page,
+              'info': '12话 / 2026-${q['month']!.padLeft(2, '0')}-08 / Staff',
+            },
+          ],
+        };
+      };
+      final days = await BangumiApi.getSeasonCalendar([
+        '2026-07-01',
+        '2026-10-01',
+      ]);
+      expect(adapter.requests, hasLength(12));
+      expect(days.expand((day) => day), hasLength(12));
+      expect(
+        days.expand((day) => day).map((s) => s.airDate),
+        contains('2026-08-08'),
+      );
+    },
+  );
+
+  test(
+    'new staff endpoint follows pagination and combines positions',
+    () async {
+      adapter.response = (request) {
+        expect(request.uri.path, '/p1/subjects/400602/staffs/persons');
+        final offset = int.parse(request.uri.queryParameters['offset']!);
+        return {
+          'total': 2,
+          'data': [
+            {
+              'staff': {'id': offset + 1, 'name': 'Staff', 'nameCN': '制作人员'},
+              'positions': [
+                {
+                  'type': {'cn': '导演'},
+                },
+                {
+                  'type': {'cn': '脚本'},
+                },
+              ],
+            },
+          ],
+        };
+      };
+      final staff = await BangumiApi.getBangumiStaffByID(400602);
+      expect(staff.data, hasLength(2));
+      expect(staff.data.first.relations, ['导演', '脚本']);
+      expect(staff.data.first.staff.nameCN, '制作人员');
+    },
+  );
+
+  test(
+    'new character and relation schemas preserve casts and relation names',
+    () async {
+      adapter.response = (request) => {
+        'total': 1,
+        'data': request.uri.path.endsWith('characters')
+            ? [
+                {
+                  'character': {'id': 12, 'name': '角色'},
+                  'type': 1,
+                  'casts': [
+                    {
+                      'person': {'id': 13, 'name': '声优'},
+                    },
+                  ],
+                },
+              ]
+            : [
+                {
+                  'subject': _subject,
+                  'relation': {'cn': '续集'},
+                },
+              ],
+      };
+      final cast = await BangumiApi.getCharatersByBangumiID(1);
+      expect(cast.charactersList.single.relation, '主角');
+      expect(cast.charactersList.single.actorList.single.id, 13);
+      final related = await BangumiApi.getBangumiRelationsByID(1);
+      expect(related.single.relation, '续集');
+      expect(related.single.bangumiItem.nameCn, '番剧');
     },
   );
 
@@ -154,7 +317,7 @@ const _subject = {
 
 class _Adapter implements HttpClientAdapter {
   final requests = <RequestOptions>[];
-  Object Function(RequestOptions) response = (_) => {};
+  FutureOr<Object> Function(RequestOptions) response = (_) => {};
   @override
   Future<ResponseBody> fetch(
     RequestOptions options,
@@ -163,7 +326,7 @@ class _Adapter implements HttpClientAdapter {
   ) async {
     requests.add(options);
     return ResponseBody.fromString(
-      jsonEncode(response(options)),
+      jsonEncode(await response(options)),
       200,
       headers: {
         Headers.contentTypeHeader: [Headers.jsonContentType],

@@ -36,8 +36,16 @@ void main() {
         MikanEchResolver(discovery, 0).resolve(uri),
         MikanEchResolver(discovery, 1).resolve(uri),
       ]);
-      expect(routes[0]!.addresses, ['162.159.135.79']);
-      expect(routes[1]!.addresses, ['162.159.136.79']);
+      expect(routes[0]!.addresses, [
+        '104.21.6.61',
+        '162.159.135.79',
+        '162.159.136.79',
+      ]);
+      expect(routes[1]!.addresses, [
+        '172.67.134.140',
+        '162.159.135.79',
+        '162.159.136.79',
+      ]);
       expect(requests, hasLength(1));
       expect(requests.single.url.toString(), isNot(contains('private-token')));
       await discovery.discover();
