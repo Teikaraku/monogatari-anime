@@ -1,0 +1,257 @@
+name: Production builds
+
+on:
+  push:
+    branches: ['codex/production-*']
+    tags: ['monogatari-v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish the completed GitHub Release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Tests and analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+          cache: true
+      - name: Native test tools
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++
+      - run: flutter pub get
+      - run: flutter analyze --no-fatal-infos --fatal-warnings
+      - run: flutter test
+      - name: Verify real torrent streaming and cleanup
+        timeout-minutes: 3
+        run: dart --packages=.dart_tool/package_config.json tool/torrent_engine_smoke.dart
+
+  android:
+    name: Android release (production signed)
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+          cache: true
+      - run: flutter pub get
+      - name: Configure private production key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.MONOGATARI_ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.MONOGATARI_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MONOGATARI_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.MONOGATARI_ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          test -n "$KEYSTORE_BASE64" && test -n "$KEYSTORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/monogatari-release.jks"
+          chmod 600 "$RUNNER_TEMP/monogatari-release.jks"
+          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$RUNNER_TEMP/monogatari-release.jks" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
+      - name: Build optimized APKs and app bundle
+        env:
+          PUBLIC_CATALOG_ORIGIN: ${{ secrets.MONOGATARI_PUBLIC_CATALOG_ORIGIN }}
+        run: |
+          test -n "$PUBLIC_CATALOG_ORIGIN" || { echo "::error::The MONOGATARI_PUBLIC_CATALOG_ORIGIN secret is not configured."; exit 1; }
+          flutter build apk --release --split-per-abi --dart-define="PUBLIC_CATALOG_ORIGIN=$PUBLIC_CATALOG_ORIGIN"
+          flutter build appbundle --release --dart-define="PUBLIC_CATALOG_ORIGIN=$PUBLIC_CATALOG_ORIGIN"
+          unzip -p build/app/outputs/flutter-apk/app-arm64-v8a-release.apk lib/arm64-v8a/libapp.so | grep -a -q -F "$PUBLIC_CATALOG_ORIGIN" \
+            || { echo "::error::The service origin is missing from the APK."; exit 1; }
+      - name: Package release
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk dist/Monogatari-Android-arm64.apk
+          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk dist/Monogatari-Android-armv7.apk
+          cp build/app/outputs/flutter-apk/app-x86_64-release.apk dist/Monogatari-Android-x64.apk
+          cp build/app/outputs/bundle/release/app-release.aab dist/Monogatari-Android.aab
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Monogatari-Android-release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove private key from runner
+        if: always()
+        run: rm -f android/key.properties "$RUNNER_TEMP/monogatari-release.jks"
+
+  windows:
+    name: Windows release (portable)
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable dependency long paths
+        run: git config --global core.longpaths true
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+          cache: true
+      - run: flutter pub get
+      - name: Verify native Windows update helper
+        run: flutter test test/windows_update_installer_test.dart
+      - name: Build Windows release
+        shell: bash
+        env:
+          PUBLIC_CATALOG_ORIGIN: ${{ secrets.MONOGATARI_PUBLIC_CATALOG_ORIGIN }}
+        run: |
+          test -n "$PUBLIC_CATALOG_ORIGIN" || { echo "::error::The MONOGATARI_PUBLIC_CATALOG_ORIGIN secret is not configured."; exit 1; }
+          flutter build windows --release --dart-define="PUBLIC_CATALOG_ORIGIN=$PUBLIC_CATALOG_ORIGIN"
+          grep -a -q -F "$PUBLIC_CATALOG_ORIGIN" build/windows/x64/runner/Release/data/app.so \
+            || { echo "::error::The service origin is missing from the Windows build."; exit 1; }
+      - name: Package complete executable bundle
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $visualStudio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $visualStudio) { throw 'Visual C++ tools are unavailable.' }
+          $redistRoot = Join-Path $visualStudio 'VC/Redist/MSVC'
+          $runtime = Get-ChildItem -LiteralPath $redistRoot -Directory -Recurse -Filter 'Microsoft.VC*.CRT' |
+            Where-Object { $_.Parent.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $runtime) { throw 'The x64 Visual C++ runtime is unavailable.' }
+          foreach ($name in @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
+            $source = Join-Path $runtime.FullName $name
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing runtime: $name" }
+            Copy-Item -LiteralPath $source -Destination build/windows/x64/runner/Release/
+          }
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath dist/Monogatari-Windows-x64.zip
+          $hash = (Get-FileHash -Algorithm SHA256 dist/Monogatari-Windows-x64.zip).Hash.ToLowerInvariant()
+          "$hash  Monogatari-Windows-x64.zip" | Set-Content dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Monogatari-Windows-release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  ios:
+    name: iOS release (unsigned IPA for sideload signing)
+    needs: verify
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+          cache: true
+      - name: Native build tools
+        run: brew list cmake ninja >/dev/null 2>&1 || brew install cmake ninja
+      - run: flutter pub get
+      - name: Build iOS release
+        env:
+          PUBLIC_CATALOG_ORIGIN: ${{ secrets.MONOGATARI_PUBLIC_CATALOG_ORIGIN }}
+        run: |
+          test -n "$PUBLIC_CATALOG_ORIGIN" || { echo "::error::The MONOGATARI_PUBLIC_CATALOG_ORIGIN secret is not configured."; exit 1; }
+          flutter build ios --release --no-codesign --dart-define="PUBLIC_CATALOG_ORIGIN=$PUBLIC_CATALOG_ORIGIN"
+          grep -a -q -F "$PUBLIC_CATALOG_ORIGIN" build/ios/iphoneos/Runner.app/Frameworks/App.framework/App \
+            || { echo "::error::The service origin is missing from the iOS app."; exit 1; }
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p dist/Payload
+          cp -R build/ios/iphoneos/Runner.app dist/Payload/Runner.app
+          find dist/Payload/Runner.app/Frameworks -type d -name '*.framework' -exec codesign --force --sign - --preserve-metadata=identifier,entitlements {} +
+          (cd dist && zip -q -r Monogatari-iOS-unsigned.ipa Payload)
+          rm -rf dist/Payload
+          (cd dist && shasum -a 256 *.ipa > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Monogatari-iOS-release-unsigned
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish complete GitHub release
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true }}
+    needs: [android, windows, ios]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: monogatari-release-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Monogatari-*-release*
+          merge-multiple: true
+          path: dist
+      - name: Validate complete release and generate checksums
+        run: |
+          test -s dist/Monogatari-Android-arm64.apk
+          test -s dist/Monogatari-Android-armv7.apk
+          test -s dist/Monogatari-Android-x64.apk
+          test -s dist/Monogatari-Android.aab
+          test -s dist/Monogatari-Windows-x64.zip
+          test -s dist/Monogatari-iOS-unsigned.ipa
+          (cd dist && sha256sum *.apk *.aab *.zip *.ipa > SHA256SUMS.txt)
+      - name: Publish after all three builds succeed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          VERSION=$(sed -n 's/^version: \([^+]*\).*/\1/p' pubspec.yaml)
+          TAG="monogatari-v$VERSION"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            test "${GITHUB_REF#refs/tags/}" = "$TAG" || { echo 'The pushed tag must match the pubspec.yaml version.'; exit 1; }
+          fi
+          if TAG_SHA=$(gh api "repos/$GH_REPO/commits/$TAG" --jq '.sha' 2>/dev/null); then
+            test "$TAG_SHA" = "$GITHUB_SHA" || { echo 'This tag belongs to another commit; increment pubspec.yaml.'; exit 1; }
+          fi
+          # A draft has no public tag yet: resolve its database ID from the list.
+          RELEASE_ID=$(gh api "repos/$GH_REPO/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+          if [ -n "$RELEASE_ID" ]; then
+            RELEASE_TARGET=$(gh api "repos/$GH_REPO/releases/$RELEASE_ID" --jq '.target_commitish')
+            TARGET_SHA=$(gh api "repos/$GH_REPO/commits/$RELEASE_TARGET" --jq '.sha')
+            test "$TARGET_SHA" = "$GITHUB_SHA" || { echo 'This release belongs to another commit; increment pubspec.yaml.'; exit 1; }
+            if [ "$(gh api "repos/$GH_REPO/releases/$RELEASE_ID" --jq '.draft')" = false ]; then
+              echo 'This exact release was already published.'
+              exit 0
+            fi
+          else
+            # Use the create response: the list endpoint may not yet expose a
+            # newly created draft, even though creation succeeded.
+            RELEASE_ID=$(gh api --method POST "repos/$GH_REPO/releases" \
+              -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
+              -f name="物语 $VERSION" -F draft=true \
+              -F body=@docs/release-notes.md --jq '.id')
+          fi
+          test -n "$RELEASE_ID"
+          gh release upload "$TAG" dist/*.apk dist/*.aab dist/*.zip dist/*.ipa dist/SHA256SUMS.txt --clobber
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID" > "$RUNNER_TEMP/release-metadata.json"
+          python3 tool/verify_release_assets.py dist "$RUNNER_TEMP/release-metadata.json"
+          MAKE_LATEST=true
+          if LATEST_TAG=$(gh api "repos/$GH_REPO/releases/latest" --jq '.tag_name' 2>/dev/null); then
+            LATEST_VERSION=${LATEST_TAG#monogatari-v}
+            LATEST_VERSION=${LATEST_VERSION#v}
+            NEWEST_VERSION=$(printf '%s\n%s\n' "$LATEST_VERSION" "$VERSION" | sort -V | tail -n 1)
+            if [ "$NEWEST_VERSION" != "$VERSION" ]; then MAKE_LATEST=false; fi
+          fi
+          gh release edit "$TAG" --draft=false "--latest=$MAKE_LATEST"

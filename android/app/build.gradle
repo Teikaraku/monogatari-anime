@@ -1,0 +1,101 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withReader('UTF-8') { reader ->
+        localProperties.load(reader)
+    }
+}
+
+def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
+if (flutterVersionCode == null) {
+    flutterVersionCode = '1'
+}
+
+def flutterVersionName = localProperties.getProperty('flutter.versionName')
+if (flutterVersionName == null) {
+    flutterVersionName = '1.0'
+}
+
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('key.properties')
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+def productionSigningReady = ['storeFile', 'storePassword', 'keyAlias', 'keyPassword'].every {
+    keystoreProperties.getProperty(it)?.trim()
+}
+if (gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') } && !productionSigningReady) {
+    throw new GradleException('Production signing is missing. Configure android/key.properties; release builds never use the debug key.')
+}
+
+android {
+    namespace "com.example.kazumi"
+    compileSdk flutter.compileSdkVersion
+    // Use the highest NDK required by the native plugins. Newer NDKs remain
+    // backward compatible with plugins that declare an older version.
+    ndkVersion "28.2.13676358"
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    sourceSets {
+        main.java.srcDirs += 'src/main/kotlin'
+    }
+
+    defaultConfig {
+        applicationId "com.monogatari.anime"
+        // You can update the following values to match your application needs.
+        // For more information, see: https://docs.flutter.dev/deployment/android#reviewing-the-gradle-build-configuration.
+        minSdkVersion flutter.minSdkVersion
+        targetSdkVersion flutter.targetSdkVersion
+        versionCode flutterVersionCode.toInteger()
+        versionName flutterVersionName
+    }
+
+    signingConfigs {
+        if (productionSigningReady) {
+            production {
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (productionSigningReady) {
+                signingConfig signingConfigs.production
+            }
+        }
+    }
+}
+
+flutter {
+    source '../..'
+}
+
+dependencies {}
+
+// GitHub split APKs and the app bundle share Flutter's monotonically increasing
+// versionCode so moving between supported distribution formats is an upgrade.
+// Flutter adds an ABI offset by default; this app selects the correct ABI from
+// release metadata rather than relying on a store's versionCode selection.
+android.applicationVariants.all { variant ->
+    variant.outputs.each { output ->
+        output.versionCodeOverride = variant.versionCode
+    }
+}
